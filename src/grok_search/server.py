@@ -9,10 +9,7 @@ mcp = FastMCP("grok-search")
 
 @mcp.tool(
     name="web_search",
-    meta={"author": "GuDa"}
-)
-async def web_search(query: str, ctx: Context = None) -> str:
-    """
+    description="""
     Performs a third-party web search based on the given query and returns the results
     as a JSON string.
 
@@ -31,7 +28,10 @@ async def web_search(query: str, ctx: Context = None) -> str:
         - `url`: the link to the result
         - `title`: a short title
         - `summary`: a brief description or snippet of the page content.
-    """
+    """,
+    meta={"author": "GuDa"}
+)
+async def web_search(query: str, ctx: Context = None) -> str:
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key

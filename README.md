@@ -3,13 +3,13 @@
 
 <!-- # Grok Search MCP -->
 
+[English](./docs/README_EN.md) | 简体中文
+
 **通过 MCP 协议将 Grok 搜索能力集成到 Claude，显著增强文档检索与事实核查能力**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![FastMCP](https://img.shields.io/badge/FastMCP-0.1.0+-green.svg)](https://github.com/jlowin/fastmcp)
-
-⭐ 在GitHub上给我们点星~您的支持对我们意义重大！ 🙏😊
-
-[English](./docs/README_EN.md) | 简体中文
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![FastMCP](https://img.shields.io/badge/FastMCP-2.0.0+-green.svg)](https://github.com/jlowin/fastmcp)
 
 </div>
 
@@ -125,9 +125,8 @@ claude mcp add grok-search -s user --transport stdio -- uvx --from git+https://g
 
 配置文件位置：
 - **自动创建位置**：`~/.config/grok-search/config.toml`
-- **项目开发模式**：`./config.toml`（与 `config.toml.example` 同级）
 
-首次运行时会自动创建配置文件模板。
+首次运行时会自动创建配置文件模板，**务必配置好URL，以及KEY**，否则无法访问服务。
 
 编辑 `config.toml` 文件：
 
@@ -158,37 +157,7 @@ claude mcp list
 
 应能看到 `grok-search` 服务器已注册。
 
-### 4. 使用示例
-
-#### 实际对话场景
-
-在 Claude 对话中直接询问需要实时搜索的问题：
-
-**示例 1：技术文档查询**
-```
-用户：FastMCP 最新版本是什么？有哪些新功能？
-
-Claude：[自动调用 web_search 工具]
-根据最新搜索结果，FastMCP 当前版本是 0.2.1，主要新增了...
-```
-
-**示例 2：实时新闻**
-```
-用户：今天有哪些重要的 AI 行业新闻？
-
-Claude：[自动调用 web_search 工具]
-今天的重要 AI 新闻包括：
-1. OpenAI 发布...
-2. Google DeepMind...
-```
-
-**示例 3：事实核查**
-```
-用户：帮我验证一下"Python 3.13 已经发布"这个说法是否准确。
-
-Claude：[自动调用 web_search 工具]
-根据搜索结果，Python 3.13 确实已于...
-```
+### 4. 项目相关说明
 
 #### 工具响应格式
 
@@ -283,15 +252,11 @@ A: 支持！任何兼容 MCP 协议的客户端都可以使用，包括但不限
 
 本项目采用 [MIT License](LICENSE) 开源。
 
-## 联系方式
-
-- 作者：GuDa Studio
-- 项目地址：https://github.com/yourusername/grok-search
-
 ---
 
 <div align="center">
 
 **如果这个项目对您有帮助，请给个 ⭐ Star！**
+[![Star History Chart](https://api.star-history.com/svg?repos=GuDaStudio/GrokSearch&type=date&legend=top-left)](https://www.star-history.com/#GuDaStudio/GrokSearch&type=date&legend=top-left)
 
 </div>
