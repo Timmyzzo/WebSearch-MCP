@@ -5,9 +5,9 @@ from .config import config
 
 LOG_DIR = config.log_dir
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / f"search_mcp_{datetime.now().strftime('%Y%m%d')}.log"
+LOG_FILE = LOG_DIR / f"grok_search_{datetime.now().strftime('%Y%m%d')}.log"
 
-logger = logging.getLogger("search_mcp")
+logger = logging.getLogger("grok_search")
 logger.setLevel(getattr(logging, config.log_level))
 
 file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')

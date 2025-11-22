@@ -5,7 +5,7 @@ from .logger import log_info
 from .config import config
 import asyncio
 
-mcp = FastMCP("search-mcp")
+mcp = FastMCP("grok-search")
 
 grok_provider = GrokSearchProvider(config.grok_api_url, config.grok_api_key)
 

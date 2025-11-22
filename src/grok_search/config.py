@@ -15,7 +15,7 @@ class Config:
         return cls._instance
     
     def _get_config_path(self) -> Path:
-        user_config_dir = Path.home() / ".config" / "search-mcp"
+        user_config_dir = Path.home() / ".config" / "grok-search"
         user_config_file = user_config_dir / "config.toml"
         
         if user_config_file.exists():
@@ -87,7 +87,7 @@ dir = "logs"
         log_dir_str = self._config_data.get("logging", {}).get("dir", "logs")
         if Path(log_dir_str).is_absolute():
             return Path(log_dir_str)
-        user_log_dir = Path.home() / ".config" / "search-mcp" / log_dir_str
+        user_log_dir = Path.home() / ".config" / "grok-search" / log_dir_str
         return user_log_dir
     
     @property

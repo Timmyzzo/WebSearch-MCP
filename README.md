@@ -58,9 +58,10 @@ Claude/Claude Code → MCP 调用 → Search MCP 服务 → 转接 Grok API → 
 
 ## 快速开始
 
-### 0. 前置要求
+<details>
+<summary><h3>0. 前置要求（点击展开）</h3></summary>
 
-#### 安装必要工具（uv）
+#### 安装必要工具
 
 **Python 环境**：
 - Python 3.10 或更高版本
@@ -105,12 +106,14 @@ wget -qO- https://astral.sh/uv/install.sh | sh
 
 <!-- 如果您正在为订阅和配置而忧愁，我们非常欢迎您[积极联系我们](https://cc.guda.studio)。 -->
 
+</details>
+
 ### 1. 安装
 
 使用 `claude mcp add` 一键安装并配置：
 
 ```bash
-claude mcp add search-mcp -s user --transport stdio -- uvx --from git+https://github.com/GuDaStudio/SearchMcp.git search-mcp
+claude mcp add grok-search -s user --transport stdio -- uvx --from git+https://github.com/GuDaStudio/GrokSearch.git grok-search
 ```
 
 ### 2. 配置
@@ -118,7 +121,7 @@ claude mcp add search-mcp -s user --transport stdio -- uvx --from git+https://gi
 #### 配置文件说明
 
 配置文件位置：
-- **自动创建位置**：`~/.config/search-mcp/config.toml`
+- **自动创建位置**：`~/.config/grok-search/config.toml`
 - **项目开发模式**：`./config.toml`（与 `config.toml.example` 同级）
 
 首次运行时会自动创建配置文件模板。
@@ -142,7 +145,7 @@ dir = "logs"    # 日志文件存储目录
 ⚠️ **安全提示**：
 - 请勿将包含真实 API Key 的 `config.toml` 提交到 Git
 - 项目已在 `.gitignore` 中排除此文件
-- 用户目录配置（`~/.config/search-mcp/`）不会被 Git 追踪
+- 用户目录配置（`~/.config/grok-search/`）不会被 Git 追踪
 
 ### 3. 验证安装：
 
@@ -150,7 +153,7 @@ dir = "logs"    # 日志文件存储目录
 claude mcp list
 ```
 
-应能看到 `search-mcp` 服务器已注册。
+应能看到 `grok-search` 服务器已注册。
 
 ### 4. 使用示例
 
@@ -212,11 +215,11 @@ Claude：[自动调用 web_search 工具]
 ## 项目架构
 
 ```
-search-mcp/
+grok-search/
 ├── config.toml.example         # 配置文件模板
 ├── pyproject.toml              # 项目元数据与依赖
 ├── README.md                   # 项目文档
-└── src/search_mcp/
+└── src/grok_search/
     ├── __init__.py             # 包入口
     ├── config.py               # 配置管理（TOML 加载）
     ├── logger.py               # 日志系统
@@ -242,7 +245,7 @@ search-mcp/
 
 ### 提交 Issue
 
-遇到问题或有建议？请[提交 Issue](https://github.com/yourusername/search-mcp/issues)。
+遇到问题或有建议？请[提交 Issue](https://github.com/yourusername/grok-search/issues)。
 
 ## 常见问题
 
@@ -280,7 +283,7 @@ A: 支持！任何兼容 MCP 协议的客户端都可以使用，包括但不限
 ## 联系方式
 
 - 作者：GuDa Studio
-- 项目地址：https://github.com/yourusername/search-mcp
+- 项目地址：https://github.com/yourusername/grok-search
 
 ---
 
