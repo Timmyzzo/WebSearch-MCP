@@ -58,6 +58,8 @@ Claude/Claude Code → MCP 调用 → Search MCP 服务 → 转接 Grok API → 
 - ✅ 可扩展架构，支持添加其他搜索 Provider
 - ✅ 完善的日志系统，便于调试和监控
 - ✅ 调试模式开关，方便开发测试
+- ✅ 支持指定聚焦的搜索平台（如 Twitter、Reddit、GitHub 等）
+- ✅ 可配置搜索结果数量范围
 
 ## 快速开始
 
@@ -239,7 +241,20 @@ A: 当前版本仅支持单一 Provider。多 Provider 支持已在路线图中�
 <details>
 <summary><b>Q: 搜索结果数量如何控制？</b></summary>
 
-A: `web_search` 工具接受 `max_results` 参数（默认 5），Claude 会根据需要自动调整。
+A: `web_search` 工具接受以下参数控制搜索结果：
+- `min_results`：最少返回结果数（默认 3）
+- `max_results`：最多返回结果数（默认 10）
+
+Claude 会根据需要自动调整这些参数。
+</details>
+
+<details>
+<summary><b>Q: 如何指定搜索特定平台？</b></summary>
+
+A: `web_search` 工具支持 `platform` 参数，可以指定搜索聚焦的平台。例如：
+- `platform="Twitter"` - 聚焦 Twitter 搜索结果
+- `platform="GitHub, Reddit"` - 聚焦 GitHub 和 Reddit 的结果
+- 留空则搜索全网
 </details>
 
 <details>

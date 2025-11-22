@@ -4,6 +4,7 @@ from typing import List
 from .base import BaseSearchProvider, SearchResult
 from ..utils import search_prompt
 from ..logger import log_info
+from ..config import config
 
 
 class GrokSearchProvider(BaseSearchProvider):
@@ -14,11 +15,19 @@ class GrokSearchProvider(BaseSearchProvider):
     def get_provider_name(self) -> str:
         return "Grok"
 
-    async def search(self, query: str, ctx=None) -> List[SearchResult]:
+    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None) -> List[SearchResult]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        platform_prompt = ""
+        return_prompt = ""
+
+        if platform:
+            platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform
+
+        if max_results:
+            return_prompt = "\n\nYou should return the results in a JSON format, and the results should at least be " + str(min_results) + " and at most be " + str(max_results) + " results."
 
         payload = {
             "model": self.model,
@@ -27,14 +36,16 @@ class GrokSearchProvider(BaseSearchProvider):
                     "role": "system",
                     "content": search_prompt,
                 },
-                {"role": "user", "content": query},
+                {"role": "user", "content": query + platform_prompt + return_prompt },
             ],
             "stream": True,
         }
 
+        await log_info(ctx, f"platform_prompt: { query + platform_prompt + return_prompt}", config.debug_enabled)
+
         timeout = httpx.Timeout(connect=6.0, read=50.0, write=10.0, pool=None)
         
-        await log_info(ctx, f"连接 Grok API: {self.api_url}")
+        await log_info(ctx, f"连接 Grok API: {self.api_url}", config.debug_enabled)
         
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream(
@@ -44,7 +55,7 @@ class GrokSearchProvider(BaseSearchProvider):
                 json=payload,
             ) as response:
                 response.raise_for_status()
-                await log_info(ctx, "正在接收流式响应...")
+                await log_info(ctx, "正在接收流式响应...", config.debug_enabled)
                 content = await self._parse_streaming_response(response, ctx)
 
         return content

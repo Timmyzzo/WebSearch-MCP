@@ -14,11 +14,11 @@ mcp = FastMCP("grok-search")
     as a JSON string.
 
     The `query` should be a clear, self-contained natural-language search query.
-    When helpful, include constraints such as topic, time range, language, or domain
-    (e.g., "过去一周的 AI 安全相关新闻", "site:fangde.com 检索检索平台文档").
+    When helpful, include constraints such as topic, time range, language, or domain.
 
-    The tool automatically chooses an appropriate number of results; callers do not
-    need to specify a limit explicitly.
+    The `platform` should be the platforms which you should focus on searching, such as "Twitter", "GitHub", "Reddit", etc.
+
+    The `min_results` and `max_results` should be the minimum and maximum number of results to return.
 
     Returns
     -------
@@ -31,7 +31,7 @@ mcp = FastMCP("grok-search")
     """,
     meta={"author": "GuDa"}
 )
-async def web_search(query: str, ctx: Context = None) -> str:
+async def web_search(query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx: Context = None) -> str:
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
@@ -44,7 +44,7 @@ async def web_search(query: str, ctx: Context = None) -> str:
     grok_provider = GrokSearchProvider(api_url, api_key)
     
     await log_info(ctx, f"Begin Search: {query}", config.debug_enabled)
-    results = await grok_provider.search(query, ctx)
+    results = await grok_provider.search(query, platform, min_results, max_results, ctx)
     await log_info(ctx, "Search Finished!", config.debug_enabled)
     return results
 
