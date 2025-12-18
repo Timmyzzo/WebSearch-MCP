@@ -2,7 +2,7 @@ import httpx
 import json
 from typing import List
 from .base import BaseSearchProvider, SearchResult
-from ..utils import search_prompt
+from ..utils import search_prompt, fetch_prompt
 from ..logger import log_info
 from ..config import config
 
@@ -55,9 +55,40 @@ class GrokSearchProvider(BaseSearchProvider):
                 json=payload,
             ) as response:
                 response.raise_for_status()
-                await log_info(ctx, "正在接收流式响应...", config.debug_enabled)
+                # await log_info(ctx, "正在接收流式响应...", config.debug_enabled)
                 content = await self._parse_streaming_response(response, ctx)
 
+        return content
+
+    async def fetch(self, url: str, ctx=None) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": fetch_prompt,
+                },
+                {"role": "user", "content": url + "\n获取该网页内容并返回其结构化Markdown格式" },
+            ],
+        }
+        timeout = httpx.Timeout(connect=6.0, read=50.0, write=10.0, pool=None)
+        await log_info(ctx, f"连接 Grok API: {self.api_url}", config.debug_enabled)
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream(
+                "POST",
+                f"{self.api_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                # await log_info(ctx, "正在接收流式响应...", config.debug_enabled)
+                content = await self._parse_streaming_response(response, ctx)
+                # await log_info(ctx, f"content: {content}", config.debug_enabled)
         return content
 
     async def _parse_streaming_response(self, response, ctx=None) -> str:
@@ -69,6 +100,7 @@ class GrokSearchProvider(BaseSearchProvider):
             # await log_info(ctx, f"收到数据: {content}")
             if not line or line == "data: [DONE]":
                 continue
+            # await log_info(ctx, f"收到数据: {line}", config.debug_enabled)
             if line.startswith("data: "):
                 try:
                     data = json.loads(line[6:])
@@ -76,7 +108,7 @@ class GrokSearchProvider(BaseSearchProvider):
                     if "content" in delta:
                         content += delta["content"]
                         chunk_count += 1
-                        if chunk_count % 10 == 0:
+                        if chunk_count % 100 == 0:
                             preview = content[-100:] if len(content) > 100 else content
                             # await log_info(ctx, f"收到数据: {content}")
                             await log_info(ctx, f"已接收 {chunk_count} 个数据块，当前内容: ...{preview}")

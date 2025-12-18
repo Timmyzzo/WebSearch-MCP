@@ -29,14 +29,22 @@ Grok Search MCP 是一个基于 [FastMCP](https://github.com/jlowin/fastmcp) 构
 ### 工作原理
 
 ```
-Claude/Claude Code → MCP 调用 → Search MCP 服务 → 转接 Grok API → 网络搜索 → 结构化结果返回
+Claude/Claude Code → MCP 调用 → Search MCP 服务 → 转接 Grok API → 网络搜索/内容抓取 → 结构化结果返回
 ```
 
+**`web_search` 搜索流程**：
 1. Claude 通过 MCP 协议调用 `web_search` 工具
 2. Search MCP 将请求转发到 Grok 第三方平台（OpenAI 兼容接口）
 3. Grok 执行实时网络搜索并返回结果
 4. Search MCP 格式化为结构化 JSON：`{title, url, content}`
 5. Claude 基于搜索结果生成更准确、更新的回答
+
+**`web_fetch` 抓取流程**：
+1. Claude 通过 MCP 协议调用 `web_fetch` 工具
+2. Search MCP 将 URL 发送到 Grok API
+3. Grok 获取网页内容并解析 HTML 结构
+4. 返回包含元数据、目录、正文的结构化 Markdown 文档
+5. Claude 基于完整网页内容进行分析和回答
 
 ## 为什么选择 Grok？
 
@@ -60,6 +68,7 @@ Claude/Claude Code → MCP 调用 → Search MCP 服务 → 转接 Grok API → 
 - ✅ 调试模式开关，方便开发测试
 - ✅ 支持指定聚焦的搜索平台（如 Twitter、Reddit、GitHub 等）
 - ✅ 可配置搜索结果数量范围
+- ✅ 网页内容抓取：自动获取 URL 内容并转换为结构化 Markdown
 
 ## 快速开始
 
@@ -161,9 +170,20 @@ claude mcp list
 
 ### 4. 项目相关说明
 
-#### 工具响应格式
+#### MCP 工具说明
 
-`web_search` 工具返回的 JSON 结构：
+本项目提供两个 MCP 工具：
+
+##### `web_search` - 网络搜索
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `query` | string | ✅ | - | 搜索查询语句 |
+| `platform` | string | ❌ | `""` | 聚焦搜索平台（如 `"Twitter"`, `"GitHub, Reddit"`） |
+| `min_results` | int | ❌ | `3` | 最少返回结果数 |
+| `max_results` | int | ❌ | `10` | 最多返回结果数 |
+
+返回 JSON 结构：
 
 ```json
 {
@@ -171,17 +191,42 @@ claude mcp list
     {
       "title": "FastMCP - Python framework for MCP servers",
       "url": "https://github.com/jlowin/fastmcp",
-      "content": "FastMCP is a Python framework that makes it easy to build Model Context Protocol (MCP) servers..."
-    },
-    {
-      "title": "FastMCP Documentation",
-      "url": "https://fastmcp.readthedocs.io/",
-      "content": "Complete guide to building MCP servers with FastMCP..."
+      "content": "FastMCP is a Python framework..."
     }
   ],
   "provider": "grok",
   "query": "FastMCP latest version"
 }
+```
+
+##### `web_fetch` - 网页内容抓取
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `url` | string | ✅ | 目标网页 URL（HTTP/HTTPS） |
+
+功能特点：
+- 获取完整网页 HTML 内容并解析
+- 自动转换为结构化 Markdown 格式
+- 保留原网页的标题层级、列表、表格、代码块等元素
+- 输出包含元数据头部（来源 URL、标题、抓取时间）
+- 移除脚本、样式等非内容元素
+
+返回 Markdown 结构示例：
+
+```markdown
+---
+source: [原始URL]
+title: [网页标题]
+fetched_at: [抓取时间]
+---
+
+## 目录
+- [章节1](#章节1)
+- [章节2](#章节2)
+
+## 章节1
+网页正文内容...
 ```
 
 ---
@@ -209,11 +254,11 @@ grok-search/
 
 | 模块 | 职责 |
 |------|------|
-| `server.py` | FastMCP 服务入口，注册 `web_search` 工具 |
+| `server.py` | FastMCP 服务入口，注册 `web_search` 和 `web_fetch` 工具 |
 | `config.py` | 单例模式管理 TOML 配置 |
 | `providers/base.py` | 定义 `SearchProvider` 抽象接口和 `SearchResult` 数据模型 |
-| `providers/grok.py` | 实现 Grok API 调用与响应解析 |
-| `utils.py` | 格式化搜索结果为 AI 友好的文本 |
+| `providers/grok.py` | 实现 Grok API 调用（搜索和内容抓取） |
+| `utils.py` | 格式化工具和 Prompt 模板管理 |
 
 ## Others
 
