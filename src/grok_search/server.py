@@ -150,7 +150,7 @@ async def web_search(
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
 
     # 计算额外信源配额
-    has_tavily = bool(config.tavily_api_key)
+    has_tavily = bool(config.tavily_api_keys)
     has_firecrawl = bool(config.firecrawl_api_key)
     firecrawl_count = 0
     tavily_count = 0
@@ -236,7 +236,7 @@ async def get_sources(
 async def _call_tavily_extract(url: str) -> str | None:
     import httpx
     api_url = config.tavily_api_url
-    api_key = config.tavily_api_key
+    api_key = config.next_tavily_api_key()
     if not api_key:
         return None
     endpoint = f"{api_url.rstrip('/')}/extract"
@@ -257,7 +257,7 @@ async def _call_tavily_extract(url: str) -> str | None:
 
 async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | None:
     import httpx
-    api_key = config.tavily_api_key
+    api_key = config.next_tavily_api_key()
     if not api_key:
         return None
     endpoint = f"{config.tavily_api_url.rstrip('/')}/search"
@@ -372,8 +372,8 @@ async def web_fetch(
         return result
 
     await log_info(ctx, "Fetch Failed!", config.debug_enabled)
-    if not config.tavily_api_key and not config.firecrawl_api_key:
-        return "配置错误: TAVILY_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
+    if not config.tavily_api_keys and not config.firecrawl_api_key:
+        return "配置错误: TAVILY_API_KEY/TAVILY_API_KEYS 和 FIRECRAWL_API_KEY 均未配置"
     return "提取失败: 所有提取服务均未能获取内容"
 
 
@@ -382,9 +382,9 @@ async def _call_tavily_map(url: str, instructions: str = None, max_depth: int = 
     import httpx
     import json
     api_url = config.tavily_api_url
-    api_key = config.tavily_api_key
+    api_key = config.next_tavily_api_key()
     if not api_key:
-        return "配置错误: TAVILY_API_KEY 未配置，请设置环境变量 TAVILY_API_KEY"
+        return "配置错误: TAVILY_API_KEY 未配置，请设置环境变量 TAVILY_API_KEY 或 TAVILY_API_KEYS"
     endpoint = f"{api_url.rstrip('/')}/map"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"url": url, "max_depth": max_depth, "max_breadth": max_breadth, "limit": limit, "timeout": timeout}
