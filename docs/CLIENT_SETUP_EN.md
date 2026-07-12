@@ -160,11 +160,14 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 
 ## 6. Acceptance steps
 
-1. Call `get_config_info` and confirm that keys are masked and Grok `/models` is reachable.
-2. Call `web_search` for a recent topic.
-3. Pass its `session_id` to `get_sources`.
-4. Extract a public page with `web_fetch`.
-5. Map a small documentation site with `web_map` and `max_depth=1`.
+1. Call `get_config_info` and confirm that keys are masked. A healthy connection returns `success`; a failed connection test with usable configuration returns `partial_success` and `error_detail`.
+2. Call `web_search` for a recent topic and confirm that a complete result has `status="success"`.
+3. Pass its `session_id` to `get_sources`. A valid session with no citations still returns `success` with an empty `sources` array.
+4. Extract a public page with `web_fetch`. If the upstream request succeeds but the page has no content, expect `error`/`tavily_no_content`, distinct from configuration or service failures.
+5. Map a small documentation site with `web_map` and `max_depth=1`. A legitimate empty map returns `error`/`tavily_no_urls`.
+6. After a structured error, list or call tools again and confirm that the MCP process remains alive.
+
+The canonical error object is `error_detail`, with at least `code`, `message`, `service`, and `retryable`; it also includes `http_status`, `upstream_code`, and redacted `diagnostics` when available. Legacy `error`, `partial`, `tavily_error`, and `grok_error` fields remain available.
 
 ## 7. Troubleshooting
 
@@ -174,8 +177,9 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 | Startup timeout | The first run may download dependencies; increase the startup timeout. |
 | Invalid JSON | Check quotes and trailing commas; use a PowerShell here-string on Windows. |
 | Grok connection failure | Verify the API root and `/models` support. |
-| Both Grok models fail | Inspect structured `grok_error` attempt counts and classification; authentication and request errors do not switch models. |
+| Both Grok models fail | Inspect `error_detail` first, then the compatible `grok_error` attempt counts and classification; authentication and request errors do not switch models. |
 | Fetch or map configuration error | Configure Tavily and ensure `TAVILY_ENABLED` is not `false`. |
+| Client displays partial success | Inspect `status="partial_success"`, `error_detail`, and the component compatibility field; the usable result is still available. |
 | Certificate verification failure | Add `--native-tls` or inspect the corporate proxy certificate. |
 
 Never commit real API keys or paste them into public issues.

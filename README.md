@@ -38,7 +38,8 @@ MCP Client ──stdio──► WebSearch MCP
 - P1 旧抓取服务清理与模块化：已完成。
 - P2 Tavily 多 Key 可靠性：已完成。
 - P3 Grok 主备模型与重试：已完成。
-- 下一阶段：P4 统一返回协议。
+- P4 统一返回协议：已完成。
+- 下一阶段：P5 搜索 Prompt 与搜索质量重构。
 
 完整需求与验收标准见 [开发路线文档](./docs/DEVELOPMENT_ROADMAP.md)。
 
@@ -127,16 +128,93 @@ switch_model
 
 ## 工具概览
 
-| 工具 | 用途 | 主要返回字段 |
+| 工具 | 用途 | 工具专属字段 |
 | --- | --- | --- |
-| `web_search` | Grok 主搜索，可选 Tavily 补充信源 | `session_id`、`content`、`sources_count`、`error`、`grok_error` |
-| `get_sources` | 读取某次搜索的完整信源 | `session_id`、`sources`、`sources_count`、`error` |
-| `web_fetch` | 使用 Tavily Extract 提取 Markdown | `url`、`content`、`provider`、`error` |
-| `web_map` | 使用 Tavily Map 发现站点结构 | `base_url`、`results`、`response_time`、`error` |
+| `web_search` | Grok 主搜索，可选 Tavily 补充信源 | `session_id`、`content`、`sources_count`、`grok_error`、`tavily_error` |
+| `get_sources` | 读取某次搜索的完整信源 | `session_id`、`sources`、`sources_count` |
+| `web_fetch` | 使用 Tavily Extract 提取 Markdown | `url`、`content`、`provider`、`tavily_error` |
+| `web_map` | 使用 Tavily Map 发现站点结构 | `base_url`、`results`、`response_time`、`tavily_error` |
 | `get_config_info` | 查看脱敏配置并测试 Grok 连接 | `configuration`、`connection_test` |
 | `switch_model` | 持久化并切换当前进程的 Grok 主模型 | `success`、`previous_model`、`current_model` |
 
-`web_search` 的 `query` 是唯一必填参数。规划工具是可选能力，不是搜索前置步骤；所有 `thought` 参数均为可选。
+所有工具还统一返回 `status`、`error`、`error_detail` 和 `partial`。`web_search` 的 `query` 是唯一必填参数。规划工具是可选能力，不是搜索前置步骤；所有 `thought` 参数均为可选。
+
+## 统一返回协议
+
+`status` 只有三种稳定值：
+
+- `success`：工具目标完整完成。合法的空信源列表可以成功，例如 Grok 给出有效答案但没有来源。
+- `partial_success`：已返回可用结果，但某个补充组件或非关键步骤失败。例如 Grok 成功、Tavily 补充失败；规划尚未完成；站点映射包含部分无效项。
+- `error`：当前工具目标未完成。空答案、空抓取内容、空 URL 映射、配置错误和上游失败都不会伪装成成功。
+
+| 工具 | `success` | `partial_success` | `error` 与空结果 |
+| --- | --- | --- | --- |
+| `web_search` | Grok 返回非空有效答案；来源可以为空。 | Grok 成功但已请求的 Tavily 补充失败。 | Grok 最终失败、流中断、无效/空答案或配置错误；Tavily 成功不能替代 Grok 答案。 |
+| `get_sources` | 会话存在；`sources=[]` 是合法空结果。 | 缓存中只有部分来源可验证。 | 会话不存在/过期或缓存组件失败。 |
+| `web_fetch` | Tavily 返回非空 Markdown。 | 当前单 URL 提取是原子操作，暂无部分成功。 | 配置、认证、限流、服务、参数错误，或上游成功但无正文的 `tavily_no_content`。 |
+| `web_map` | 返回至少一个 URL 且响应完整。 | 返回了 URL，但缺少根 URL 或忽略了无效项。 | Tavily 故障，或上游成功但没有 URL 的 `tavily_no_urls`。 |
+| `get_config_info` | 脱敏配置读取和 Grok 连接测试均成功。 | 配置可返回，但连接/认证/配置测试失败。 | 连脱敏配置对象都无法构造。 |
+| `switch_model` | 主模型成功写入当前进程和兼容配置。 | 原子写入，暂无部分成功。 | 模型为空或配置持久化失败；仍只修改主模型。 |
+| 规划工具 | 所需阶段已完成并生成可执行计划。 | 会话有效但仍有必需阶段未完成。 | 会话不存在、JSON 参数无效或规划组件失败。 |
+
+规范错误位于 `error_detail`：
+
+```json
+{
+  "code": "tavily_service_unavailable",
+  "message": "Tavily 服务暂时不可用",
+  "service": "tavily",
+  "retryable": true,
+  "http_status": 503,
+  "upstream_code": "upstream_unavailable",
+  "diagnostics": {
+    "service_circuit": {"state": "open", "retry_after_seconds": 30}
+  }
+}
+```
+
+诊断信息只包含必要的脱敏字段，不包含 Grok/Tavily Key、Authorization 头、可能回显凭据的响应正文、Python traceback 或内部对象表示。结构化错误只结束当前工具调用，stdio MCP 进程仍可发现工具并执行后续调用。
+
+兼容字段映射：
+
+| 旧字段 | P4 映射 |
+| --- | --- |
+| `error` | 继续保留字符串形式的旧错误码或旧消息；新调用方应读取 `error_detail`。 |
+| `partial` | `status="partial_success"` 时为 `true`，其他状态默认为 `false`。 |
+| `tavily_error` | 保留 P2 Key 状态与服务熔断摘要，并补充重试性、HTTP/上游错误码。 |
+| `grok_error` | 保留 P3 主备模型、实际尝试次数、最后错误类型和切换状态。 |
+| `content`、`results`、`success` | 继续保留原工具字段；是否成功统一以 `status` 为准。 |
+
+典型返回如下。
+
+`web_search` 完整成功；有效答案没有来源仍是成功：
+
+```json
+{"status":"success","session_id":"abc123","content":"有效答案","sources_count":0,"error":null,"error_detail":null,"partial":false}
+```
+
+Grok 成功但 Tavily 补充失败：
+
+```json
+{"status":"partial_success","session_id":"abc123","content":"有效答案","sources_count":0,"partial":true,"error":null,"error_detail":{"code":"tavily_all_keys_unavailable","message":"所有 Tavily Key 均不可用","service":"tavily","retryable":false,"http_status":401,"upstream_code":"invalid_api_key","diagnostics":{"key_statuses":[{"fingerprint":"tvly…1234","state":"invalid"}]}},"tavily_error":{"code":"tavily_all_keys_unavailable","message":"所有 Tavily Key 均不可用"}}
+```
+
+Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
+
+```json
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_and_fallback_failed","error_detail":{"code":"grok_primary_and_fallback_failed","message":"Grok 主模型和备用模型均不可用","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":3,"fallback_attempts":3,"total_attempts":6}},"partial":false}
+```
+
+其他工具示例：
+
+```jsonl
+{"tool":"get_sources","status":"success","session_id":"abc123","sources":[],"sources_count":0}
+{"tool":"web_fetch","status":"success","url":"https://example.com","content":"# Page","provider":"tavily"}
+{"tool":"web_map","status":"error","base_url":"https://example.com","results":[],"error_detail":{"code":"tavily_no_urls","message":"Tavily 请求成功，但没有发现可返回的 URL","service":"tavily","retryable":false,"http_status":null,"upstream_code":null,"diagnostics":{"upstream_succeeded":true,"empty_result":true}}}
+{"tool":"get_config_info","status":"partial_success","partial":true,"configuration":{"GROK_API_KEY":"未配置"},"connection_test":{"status":"配置错误"},"error_detail":{"code":"grok_configuration_error","message":"GROK_API_KEY 未配置","service":"grok","retryable":false,"http_status":null,"upstream_code":null,"diagnostics":{"configuration":"grok"}}}
+{"tool":"switch_model","status":"success","success":true,"previous_model":"grok-4-fast","current_model":"grok-3-mini","message":"主模型已切换"}
+{"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"搜索计划尚未完成，可继续提交剩余规划阶段","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
+```
 
 ## Grok 主备模型与重试
 
@@ -165,7 +243,7 @@ TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
 
 401/403 会使当前 Key 失效；429 会根据错误码、正文和 `Retry-After` 区分临时限流与额度耗尽；400/422 直接返回参数错误；404 提示检查 `TAVILY_API_URL`。多个不同 Key 出现相同 5xx 或网络错误时会触发服务级熔断，冷却后仅允许一次半开探测。
 
-所有 Key 不可用时，`web_fetch` 和 `web_map` 返回 `tavily_all_keys_unavailable` 及脱敏状态摘要。`web_search` 会保留已有 Grok 结果，但设置 `partial=true` 并返回 `tavily_error`，明确说明 Tavily 补充失败。该错误只终止当前工具调用，不会退出 MCP 进程。
+所有 Key 不可用时，`web_fetch` 和 `web_map` 返回 `status="error"`、`tavily_all_keys_unavailable` 及脱敏状态摘要。`web_search` 会保留已有 Grok 结果，返回 `status="partial_success"`，同时设置 `partial=true` 并保留 `tavily_error`。该错误只终止当前工具调用，不会退出 MCP 进程。
 
 ## 常见问题
 

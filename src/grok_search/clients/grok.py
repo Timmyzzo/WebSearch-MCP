@@ -122,11 +122,14 @@ class GrokClientError(RuntimeError):
         self.last_http_status = last_failure.http_status
         self.last_upstream_code = last_failure.upstream_code
         self.switched_model = switched_model
+        self.retryable = last_failure.action in {"retry", "switch"}
 
     def to_dict(self) -> dict[str, object]:
         return {
             "code": self.code,
             "message": self.message,
+            "service": "grok",
+            "retryable": self.retryable,
             "primary_model": self.primary_model,
             "fallback_model": self.fallback_model,
             "primary_attempts": self.primary_attempts,
@@ -136,6 +139,7 @@ class GrokClientError(RuntimeError):
             "last_http_status": self.last_http_status,
             "last_upstream_code": self.last_upstream_code,
             "switched_model": self.switched_model,
+            "diagnostics": {},
         }
 
 

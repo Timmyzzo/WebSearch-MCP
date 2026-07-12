@@ -33,6 +33,14 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
         web._GROK_CLIENT = None
         web._GROK_CLIENT_SIGNATURE = None
         web._TAVILY_CLIENT = None
+        web._AVAILABLE_MODELS_CACHE.clear()
+        web._SOURCES_CACHE._cache.clear()
+    except ImportError:
+        pass
+    try:
+        from grok_search.planning import engine
+
+        engine._sessions.clear()
     except ImportError:
         pass
     yield
