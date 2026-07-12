@@ -127,6 +127,7 @@ You can also configure additional environment variables in the `env` field:
 | `GROK_API_KEY` | No | `{GUDA_API_KEY}` | Grok API key, overrides GuDa-derived value |
 | `GROK_MODEL` | No | `grok-4.20-beta` | Default model (takes precedence over `~/.config/grok-search/config.json` when set) |
 | `TAVILY_API_KEY` | No | `{GUDA_API_KEY}` | Tavily API key (for web_fetch / web_map) |
+| `TAVILY_API_KEYS` | No | - | Multiple Tavily API keys, separated by commas, semicolons, or newlines; takes precedence over `TAVILY_API_KEY` |
 | `TAVILY_API_URL` | No | `{GUDA_BASE_URL}/tavily` | Tavily API endpoint |
 | `TAVILY_ENABLED` | No | `true` | Enable Tavily |
 | `FIRECRAWL_API_KEY` | No | `{GUDA_API_KEY}` | Firecrawl API key (fallback when Tavily fails) |

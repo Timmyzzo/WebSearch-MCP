@@ -1,6 +1,8 @@
 import os
 import json
+import re
 from pathlib import Path
+from threading import Lock
 
 class Config:
     _instance = None
@@ -17,6 +19,8 @@ class Config:
             cls._instance = super().__new__(cls)
             cls._instance._config_file = None
             cls._instance._cached_model = None
+            cls._instance._tavily_key_index = 0
+            cls._instance._tavily_key_lock = Lock()
         return cls._instance
 
     @property
@@ -91,9 +95,32 @@ class Config:
     def tavily_api_url(self) -> str:
         return os.getenv("TAVILY_API_URL", "https://api.tavily.com")
 
+    @staticmethod
+    def _split_api_keys(value: str | None) -> list[str]:
+        if not value:
+            return []
+        return [key.strip() for key in re.split(r"[,;\r\n]+", value) if key.strip()]
+
+    @property
+    def tavily_api_keys(self) -> list[str]:
+        keys = self._split_api_keys(os.getenv("TAVILY_API_KEYS"))
+        if keys:
+            return keys
+        return self._split_api_keys(os.getenv("TAVILY_API_KEY"))
+
     @property
     def tavily_api_key(self) -> str | None:
-        return os.getenv("TAVILY_API_KEY")
+        keys = self.tavily_api_keys
+        return keys[0] if keys else None
+
+    def next_tavily_api_key(self) -> str | None:
+        keys = self.tavily_api_keys
+        if not keys:
+            return None
+        with self._tavily_key_lock:
+            key = keys[self._tavily_key_index % len(keys)]
+            self._tavily_key_index = (self._tavily_key_index + 1) % len(keys)
+            return key
 
     @property
     def firecrawl_api_url(self) -> str:
@@ -167,6 +194,14 @@ class Config:
             return "***"
         return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
 
+    def _mask_api_keys(self, keys: list[str]) -> str:
+        if not keys:
+            return "未配置"
+        masked = ", ".join(self._mask_api_key(key) for key in keys)
+        if len(keys) == 1:
+            return masked
+        return f"{masked}（共 {len(keys)} 个）"
+
     def get_config_info(self) -> dict:
         """获取配置信息（API Key 已脱敏）"""
         try:
@@ -188,7 +223,7 @@ class Config:
             "GROK_LOG_DIR": str(self.log_dir),
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
-            "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key) if self.tavily_api_key else "未配置",
+            "TAVILY_API_KEY": self._mask_api_keys(self.tavily_api_keys),
             "FIRECRAWL_API_URL": self.firecrawl_api_url,
             "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
             "config_status": config_status

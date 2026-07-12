@@ -127,6 +127,7 @@ claude mcp add-json grok-search --scope user '{
 | `GROK_API_KEY` | ✅ | - | Grok API 密钥 |
 | `GROK_MODEL` | ❌ | `grok-4-fast` | 默认模型（设置后优先于 `~/.config/grok-search/config.json`） |
 | `TAVILY_API_KEY` | ❌ | - | Tavily API 密钥（用于 web_fetch / web_map） |
+| `TAVILY_API_KEYS` | ❌ | - | 多个 Tavily API 密钥，支持逗号、分号或换行分隔；配置后优先于 `TAVILY_API_KEY` |
 | `TAVILY_API_URL` | ❌ | `https://api.tavily.com` | Tavily API 地址 |
 | `TAVILY_ENABLED` | ❌ | `true` | 是否启用 Tavily |
 | `FIRECRAWL_API_KEY` | ❌ | - | Firecrawl API 密钥（Tavily 失败时托底） |
