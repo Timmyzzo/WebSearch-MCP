@@ -1,16 +1,13 @@
 import ast
+import asyncio
 import json
 import re
 import uuid
 from collections import OrderedDict
 from typing import Any
 
-import asyncio
-
-from .utils import extract_unique_urls
-
-
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
 _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
@@ -27,6 +24,17 @@ _SOURCES_FUNCTION_PATTERN = re.compile(
 
 def new_session_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def extract_unique_urls(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _URL_PATTERN.finditer(text):
+        url = match.group().rstrip(".,;:!?")
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
 
 
 class SourcesCache:

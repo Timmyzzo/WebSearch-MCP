@@ -15,26 +15,26 @@
 
 ## 2. 已确认的产品决策
 
-- [ ] 完整移除 Firecrawl，包括 Search、Scrape、配置项、降级逻辑、文档和遗留工具描述。
-- [ ] 不再实现 Firecrawl Scrape 自动降级，网页抓取仅使用 Tavily Extract。
+- [x] 完整移除旧抓取服务，包括 Search、Scrape、配置项、降级逻辑、文档和遗留工具描述。
+- [x] 不再实现旧抓取服务自动降级，网页抓取仅使用 Tavily Extract。
 - [ ] Tavily 多 Key 采用轮询作为正常调度方式。
 - [ ] Tavily Key 出错时按状态码和响应内容分类，采用不同熔断策略。
 - [ ] Grok 支持主模型和备用模型；主模型连续失败后自动切换备用模型。
-- [ ] MCP 必须兼容 Cherry Studio、Claude Code 和 Codex，核心能力不得依赖某个客户端的私有配置。
+- [x] MCP 必须兼容 Cherry Studio、Claude Code 和 Codex，核心能力不得依赖某个客户端的私有配置。
 - [ ] 当前阶段不调整敏感日志策略，先保证功能稳定和搜索质量。
-- [ ] 后续代码提交目标仓库为 `https://github.com/Timmyzzo/WebSearch-MCP`。
+- [x] 后续代码提交目标仓库为 `https://github.com/Timmyzzo/WebSearch-MCP`。
 
 ## 3. 跨客户端兼容要求
 
 ### 3.1 通用协议要求
 
-- [ ] 以标准 MCP stdio transport 作为基础运行方式。
-- [ ] 工具参数使用稳定、简单的 JSON Schema，避免客户端特有类型。
-- [ ] 工具正常结果和错误结果都返回结构化对象，避免让客户端解析混合文本。
-- [ ] `Context` 等客户端上下文必须是可选能力；没有 Context 时工具仍可正常运行。
-- [ ] 不要求调用方暴露完整思维过程，不把 `thought` 作为必填参数。
-- [ ] 不在 MCP 核心工具中修改 Claude Code、Codex 或 Cherry Studio 的本地配置。
-- [ ] 移除或迁出 `toggle_builtin_tools`；此类客户端配置改为文档说明。
+- [x] 以标准 MCP stdio transport 作为基础运行方式。
+- [x] 工具参数使用稳定、简单的 JSON Schema，避免客户端特有类型。
+- [x] 工具正常结果和错误结果都返回结构化对象，避免让客户端解析混合文本。
+- [x] `Context` 等客户端上下文必须是可选能力；没有 Context 时工具仍可正常运行。
+- [x] 不要求调用方暴露完整思维过程，不把 `thought` 作为必填参数。
+- [x] 不在 MCP 核心工具中修改 Claude Code、Codex 或 Cherry Studio 的本地配置。
+- [x] 移除客户端专属配置工具；此类客户端配置改为文档说明。
 
 ### 3.2 兼容性验收矩阵
 
@@ -42,7 +42,7 @@
 - [ ] Claude Code：能通过 stdio 启动、搜索、抓取、映射和读取信源。
 - [ ] Codex：能通过 stdio 启动，长时间调用不会因父进程监控或信号处理异常退出。
 - [ ] 三个客户端对同一工具的必填参数、默认值和返回字段理解一致。
-- [ ] 为三个客户端分别提供可复制的安装与环境变量配置示例。
+- [x] 为三个客户端分别提供可复制的安装与环境变量配置示例。
 
 ## 4. Tavily 多 Key 调度与熔断
 
@@ -237,14 +237,14 @@
 ### P0：仓库与基线
 
 - [x] 将远程仓库切换到 `Timmyzzo/WebSearch-MCP`。
-- [ ] 更新 README、安装命令、包描述和仓库链接。
-- [ ] 建立最小测试与 CI 基线。
+- [x] 更新 README、安装命令、包描述和仓库链接。
+- [x] 建立最小测试与 CI 基线。
 
-### P1：移除 Firecrawl 与模块化
+### P1：移除旧抓取服务与模块化
 
-- [ ] 删除全部 Firecrawl 代码和文档。
-- [ ] 将 `server.py` 拆分为工具层、Grok 客户端、Tavily 客户端和公共响应模型。
-- [ ] 删除未使用函数、Prompt 和不一致类型定义。
+- [x] 删除全部旧抓取服务代码和文档。
+- [x] 将 `server.py` 拆分为工具层、Grok 客户端、Tavily 客户端和公共响应模型。
+- [x] 删除未使用函数、Prompt 和不一致类型定义。
 
 ### P2：Tavily 可靠性
 
@@ -299,7 +299,7 @@
 第一阶段可用版本应满足：
 
 - Cherry Studio、Claude Code、Codex 均可稳定调用。
-- Firecrawl 无任何运行时代码和配置残留。
+- 旧抓取服务无任何运行时代码和配置残留。
 - Tavily 正常轮询，多种错误能正确分类并切换 Key。
 - 所有 Tavily Key 不可用时，当前调用快速停止并明确提醒用户。
 - Grok 主模型失败后自动切换备用模型，双模型失败时返回清晰错误。
