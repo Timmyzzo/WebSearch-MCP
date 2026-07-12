@@ -5,6 +5,7 @@ import re
 import uuid
 from collections import OrderedDict
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
@@ -20,6 +21,13 @@ _SOURCES_HEADING_PATTERN = re.compile(
 _SOURCES_FUNCTION_PATTERN = re.compile(
     r"(?im)(^|\n)\s*(sources|source|citations|citation|references|reference|citation_card|source_cards|source_card)\s*\("
 )
+_TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+    "ref_src",
+}
 
 
 def new_session_id() -> str:
@@ -68,11 +76,46 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
             if not isinstance(url, str) or not url.strip():
                 continue
             url = url.strip()
-            if url in seen:
+            source_key = canonical_source_key(url)
+            if source_key in seen:
                 continue
-            seen.add(url)
+            seen.add(source_key)
             merged.append(item)
     return merged
+
+
+def canonical_source_key(url: str) -> str:
+    """Return a deterministic key for conservative source deduplication."""
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return url.strip()
+
+    try:
+        host = (parsed.hostname or "").casefold()
+        port = parsed.port
+    except ValueError:
+        return url.strip()
+    if host.startswith("www."):
+        host = host[4:]
+    default_port = (parsed.scheme == "http" and port == 80) or (
+        parsed.scheme == "https" and port == 443
+    )
+    netloc = host if port is None or default_port else f"{host}:{port}"
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    query = urlencode(
+        sorted(
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in _TRACKING_QUERY_KEYS
+        )
+    )
+    return urlunsplit((parsed.scheme.casefold(), netloc, path, query, ""))
 
 
 def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:

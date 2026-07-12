@@ -34,7 +34,8 @@ Typical uses include retrieving current official documentation, producing answer
 - P2 Tavily multi-key reliability: complete.
 - P3 Grok primary/fallback models and retries: complete.
 - P4 unified response protocol: complete.
-- Next: P5 search prompt and quality work.
+- P5 search prompt and quality work: complete.
+- Next: P6 real cross-client acceptance testing.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
 
@@ -128,6 +129,27 @@ Primary-model precedence is: a model selected by `switch_model` in the current p
 | `switch_model` | Persist and select the primary Grok model | `success`, `previous_model`, `current_model` |
 
 Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
+
+## Search quality and dynamic depth
+
+P5 classifies each `web_search` by complexity, freshness, and risk, then applies a bounded search depth:
+
+- `fast`: simple facts or one official document, usually 1–2 targeted searches and a concise answer.
+- `standard`: ordinary professional questions, usually 2–4 targeted searches with verification of important claims.
+- `deep`: time-sensitive, comparative, high-risk, complex technical, niche, or contested questions, usually 4–8 multi-angle searches with primary sources, counterevidence, limitations, and necessary cross-validation.
+
+These are bounded prompt budgets, not an autonomous unbounded tool loop. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
+
+The general source hierarchy is: official documentation/standards/laws/original data/papers and systematic reviews; authoritative institutions and maintainers; fact-checked professional media; professional practice; then blogs, forums, and social-media leads. High-tier sources support key conclusions, repeated syndication is not independent evidence, and insufficient evidence is stated explicitly.
+
+Domain policies include:
+
+- Software and GitHub: prefer current default-branch docs, README, releases, changelog, migration guides, API references, commits, issues, pull requests, and maintainer statements; verify stable versions, dates, deprecations, and merged code.
+- Fitness, health, nutrition, and recovery: separate research support, expert practice, and athlete experience; account for training age, injury, baseline, recovery, equipment, and training phase; state the medical-assessment boundary for injury, disease, drugs, or extreme diets.
+- Vehicle and other high-risk safety: prefer official tests and real-world incident data, separate crash avoidance from occupant protection, avoid comparing incompatible rating protocols, and explain statistical limits and uncertainty.
+- Niche, ambiguous, or evidence-sparse questions: define concepts, use synonyms or other languages when useful, seek counterexamples, failures, and competing schools, and cross-check key claims with two independent source types where possible.
+
+Queries such as “latest,” “current,” “today,” “current version,” or “still supported” use the actual runtime date and timezone and verify versions, release dates, and update times. Complex answers explain evidence level, disputes, limits, scope, and uncertainty when useful; simple answers are not forced into a long template. The P4 `success`, `partial_success`, `error`, `error_detail`, and compatibility fields remain unchanged.
 
 ## Unified response protocol
 
