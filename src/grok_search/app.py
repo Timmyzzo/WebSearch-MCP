@@ -10,8 +10,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     try:
         yield {}
     finally:
-        from .tools.web import close_tavily_client
+        from .tools.web import close_grok_client, close_tavily_client
 
+        await close_grok_client()
         await close_tavily_client()
 
 

@@ -91,3 +91,58 @@ async def test_stdio_tavily_error_is_structured_and_server_stays_alive():
     assert "tvly-secret-key-0001" not in serialized
     assert "tvly-secret-key-0002" not in serialized
     assert {tool.name for tool in tools_after_error.tools}.issuperset({"web_fetch", "web_map"})
+
+
+async def test_stdio_grok_failover_error_is_structured_and_server_stays_alive():
+    class UnavailableHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = b'{"error":{"code":"upstream_unavailable","message":"temporary"}}'
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UnavailableHandler)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src")
+    env["GROK_API_URL"] = f"http://127.0.0.1:{upstream.server_port}"
+    env["GROK_API_KEY"] = "grok-secret-key"
+    env["GROK_PRIMARY_MODEL"] = "primary"
+    env["GROK_FALLBACK_MODEL"] = "fallback"
+    env["GROK_MODEL_MAX_ATTEMPTS"] = "1"
+    env["TAVILY_ENABLED"] = "false"
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "grok_search.server"],
+        cwd=root,
+        env=env,
+        encoding="utf-8",
+        encoding_error_handler="replace",
+    )
+
+    try:
+        async with stdio_client(server) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                search_result = await session.call_tool("web_search", {"query": "question"})
+                tools_after_error = await session.list_tools()
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    structured = search_result.structuredContent
+    assert search_result.isError is False
+    assert structured["error"] == "grok_primary_and_fallback_failed"
+    assert structured["grok_error"]["primary_attempts"] == 1
+    assert structured["grok_error"]["fallback_attempts"] == 1
+    assert structured["grok_error"]["total_attempts"] == 2
+    assert "grok-secret-key" not in str(structured)
+    assert {tool.name for tool in tools_after_error.tools}.issuperset({"web_search", "web_fetch"})

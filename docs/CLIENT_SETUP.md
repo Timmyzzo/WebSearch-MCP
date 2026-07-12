@@ -19,6 +19,9 @@ uvx --version
 ```text
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
+GROK_PRIMARY_MODEL=grok-4-fast
+GROK_FALLBACK_MODEL=grok-3-mini
+GROK_MODEL_MAX_ATTEMPTS=3
 ```
 
 如需网页提取、站点映射或额外信源，再配置：
@@ -28,6 +31,8 @@ TAVILY_API_KEY=tvly-your-tavily-key
 ```
 
 多个 Tavily Key 使用 `TAVILY_API_KEYS`，例如 `key-1,key-2,key-3`。
+
+`GROK_PRIMARY_MODEL` 未设置或为空时，会使用兼容变量 `GROK_MODEL`，再回退到持久化配置和 `grok-4-fast`。备用模型可省略；主备相同时不会重复调用。每个不同模型默认最多实际请求 3 次。
 
 可选可靠性参数：`TAVILY_KEY_COOLDOWN=30`、`TAVILY_QUOTA_COOLDOWN=3600`、`TAVILY_SERVICE_FAILURE_THRESHOLD=2`、`TAVILY_SERVICE_COOLDOWN=30`。通常保持默认值即可。
 
@@ -48,6 +53,9 @@ TAVILY_API_KEY=tvly-your-tavily-key
       "env": {
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
+        "GROK_PRIMARY_MODEL": "grok-4-fast",
+        "GROK_FALLBACK_MODEL": "grok-3-mini",
+        "GROK_MODEL_MAX_ATTEMPTS": "3",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
     }
@@ -74,6 +82,8 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
+    "GROK_PRIMARY_MODEL": "grok-4-fast",
+    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -96,6 +106,8 @@ $config = @'
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
+    "GROK_PRIMARY_MODEL": "grok-4-fast",
+    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }
@@ -129,6 +141,9 @@ tool_timeout_sec = 180
 [mcp_servers.grok-search.env]
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
+GROK_PRIMARY_MODEL = "grok-4-fast"
+GROK_FALLBACK_MODEL = "grok-3-mini"
+GROK_MODEL_MAX_ATTEMPTS = "3"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
 
@@ -167,6 +182,7 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 | 启动超时 | 首次安装可能需要下载依赖；提高 `startup_timeout_sec`。 |
 | JSON 配置报错 | 检查尾逗号、引号和 PowerShell 转义；优先使用 here-string。 |
 | Grok 连接失败 | 检查 `GROK_API_URL` 是否包含正确的 API 根路径及 `/models` 支持。 |
+| Grok 返回主备模型失败 | 查看结构化 `grok_error` 的尝试次数和最后错误分类；认证/参数错误不会切换模型。 |
 | 抓取或映射报配置错误 | 配置 Tavily Key，并确认 `TAVILY_ENABLED` 未设为 `false`。 |
 | 证书验证失败 | 为 `uvx` 增加 `--native-tls`，或检查企业代理证书。 |
 

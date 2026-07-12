@@ -17,12 +17,27 @@ class TavilyErrorDetail(BaseModel):
     service: dict[str, Any] = Field(default_factory=dict)
 
 
+class GrokErrorDetail(BaseModel):
+    code: str
+    message: str
+    primary_model: str
+    fallback_model: str | None = None
+    primary_attempts: int = Field(ge=0)
+    fallback_attempts: int = Field(ge=0)
+    total_attempts: int = Field(ge=0)
+    last_error_type: str
+    last_http_status: int | None = None
+    last_upstream_code: str | None = None
+    switched_model: bool = False
+
+
 class WebSearchResponse(BaseModel):
     session_id: str
     content: str
     sources_count: int = Field(ge=0)
     error: str | None = None
     partial: bool = False
+    grok_error: GrokErrorDetail | None = None
     tavily_error: TavilyErrorDetail | None = None
 
 

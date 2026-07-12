@@ -1,17 +1,67 @@
+from __future__ import annotations
+
+import asyncio
 import json
+import random
+import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
-from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt
-from tenacity.wait import wait_base, wait_random_exponential
 
 from ..config import config
 from ..logger import log_info
 from ..prompts import SEARCH_PROMPT
 
-RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_RELAY_ACCOUNT_PATTERNS = (
+    "上游账号不可用",
+    "上游账号异常",
+    "死号",
+    "账号池暂时不可用",
+    "账号池不可用",
+    "upstream account unavailable",
+    "upstream account is unavailable",
+    "no available upstream account",
+    "account pool unavailable",
+    "account pool temporarily unavailable",
+    "dead account",
+)
+_MODEL_NOT_FOUND_PATTERNS = (
+    "model_not_found",
+    "model not found",
+    "model does not exist",
+    "unknown model",
+    "模型不存在",
+)
+_MODEL_PERMISSION_PATTERNS = (
+    "model_access_denied",
+    "model_permission_denied",
+    "permission denied for model",
+    "does not have access to model",
+    "not authorized to use model",
+    "无权访问模型",
+    "模型无权限",
+)
+_MODEL_UNAVAILABLE_PATTERNS = (
+    "model_unavailable",
+    "model temporarily unavailable",
+    "model is unavailable",
+    "model overloaded",
+    "模型暂时不可用",
+    "模型不可用",
+)
+_AUTH_PATTERNS = (
+    "invalid_api_key",
+    "authentication_error",
+    "invalid authentication",
+    "incorrect api key",
+    "api key invalid",
+    "api key is invalid",
+    "认证失败",
+    "密钥无效",
+)
 
 
 def get_local_time_info() -> str:
@@ -29,48 +79,64 @@ def get_local_time_info() -> str:
     )
 
 
-def _is_retryable_exception(exc: BaseException) -> bool:
-    if isinstance(
-        exc,
-        (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError, httpx.RemoteProtocolError),
-    ):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in RETRYABLE_STATUS_CODES
-    return False
+class _AttemptFailure(RuntimeError):
+    def __init__(
+        self,
+        error_type: str,
+        *,
+        action: str,
+        http_status: int | None = None,
+        upstream_code: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+        self.action = action
+        self.http_status = http_status
+        self.upstream_code = upstream_code
+        self.retry_after = retry_after
 
 
-class _WaitWithRetryAfter(wait_base):
-    def __init__(self, multiplier: float, max_wait: int):
-        self._base_wait = wait_random_exponential(multiplier=multiplier, max=max_wait)
-        self._protocol_error_base = 3.0
+class GrokClientError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        primary_model: str,
+        fallback_model: str | None,
+        primary_attempts: int,
+        fallback_attempts: int,
+        last_failure: _AttemptFailure,
+        switched_model: bool,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.primary_model = primary_model
+        self.fallback_model = fallback_model
+        self.primary_attempts = primary_attempts
+        self.fallback_attempts = fallback_attempts
+        self.total_attempts = primary_attempts + fallback_attempts
+        self.last_error_type = last_failure.error_type
+        self.last_http_status = last_failure.http_status
+        self.last_upstream_code = last_failure.upstream_code
+        self.switched_model = switched_model
 
-    def __call__(self, retry_state: Any) -> float:
-        if retry_state.outcome and retry_state.outcome.failed:
-            exc = retry_state.outcome.exception()
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
-                retry_after = self._parse_retry_after(exc.response)
-                if retry_after is not None:
-                    return retry_after
-            if isinstance(exc, httpx.RemoteProtocolError):
-                return self._base_wait(retry_state) + self._protocol_error_base
-        return self._base_wait(retry_state)
-
-    @staticmethod
-    def _parse_retry_after(response: httpx.Response) -> float | None:
-        header = response.headers.get("Retry-After")
-        if not header:
-            return None
-        header = header.strip()
-        if header.isdigit():
-            return float(header)
-        try:
-            retry_dt = parsedate_to_datetime(header)
-            if retry_dt.tzinfo is None:
-                retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-            return max(0.0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
-        except (TypeError, ValueError):
-            return None
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "primary_model": self.primary_model,
+            "fallback_model": self.fallback_model,
+            "primary_attempts": self.primary_attempts,
+            "fallback_attempts": self.fallback_attempts,
+            "total_attempts": self.total_attempts,
+            "last_error_type": self.last_error_type,
+            "last_http_status": self.last_http_status,
+            "last_upstream_code": self.last_upstream_code,
+            "switched_model": self.switched_model,
+        }
 
 
 class GrokClient:
@@ -78,13 +144,23 @@ class GrokClient:
         self,
         api_url: str,
         api_key: str,
-        model: str,
+        model: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-    ):
+        *,
+        client: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        random_source: Callable[[], float] = random.random,
+    ) -> None:
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.transport = transport
+        self._client = client
+        self._owns_client = client is None
+        self._client_lock = asyncio.Lock()
+        self._closed = False
+        self._sleep = sleep
+        self._random = random_source
 
     @property
     def headers(self) -> dict[str, str]:
@@ -93,91 +169,391 @@ class GrokClient:
             "Content-Type": "application/json",
         }
 
+    async def __aenter__(self) -> GrokClient:
+        await self._get_client()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._closed:
+            raise RuntimeError("Grok HTTP 客户端已关闭")
+        if self._client is not None:
+            return self._client
+        async with self._client_lock:
+            if self._client is None:
+                timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
+                self._client = httpx.AsyncClient(
+                    base_url=self.api_url,
+                    timeout=timeout,
+                    follow_redirects=True,
+                    transport=self.transport,
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+
     async def list_models(self) -> list[str]:
-        async with httpx.AsyncClient(timeout=10.0, transport=self.transport) as client:
-            response = await client.get(f"{self.api_url}/models", headers=self.headers)
-            response.raise_for_status()
+        response = await (await self._get_client()).get(
+            "/models", headers=self.headers, timeout=10.0
+        )
+        if not response.is_success:
+            await response.aread()
+            raise self._classify_response(response)
+        try:
             data = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Grok 模型列表返回了无效 JSON") from exc
         return [
             item["id"]
             for item in (data or {}).get("data", []) or []
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         ]
 
-    async def search(self, query: str, platform: str = "", ctx: Any = None) -> str:
+    async def search(
+        self,
+        query: str,
+        platform: str = "",
+        ctx: Any = None,
+        *,
+        primary_model: str | None = None,
+        fallback_model: str | None = None,
+        max_attempts: int | None = None,
+    ) -> str:
+        primary = primary_model or self.model
+        if not primary:
+            raise ValueError("Grok 主模型未配置")
+        attempts_limit = (
+            max_attempts if max_attempts is not None else config.grok_model_max_attempts
+        )
+        if attempts_limit < 1:
+            raise ValueError("每个模型的最大尝试次数必须大于或等于 1")
+        reported_fallback = fallback_model
+        fallback = fallback_model if fallback_model and fallback_model != primary else None
+
         platform_prompt = ""
         if platform:
             platform_prompt = (
                 "\n\nSearch the web for the information you need and focus on this platform: "
                 f"{platform}\n"
             )
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": SEARCH_PROMPT},
-                {
-                    "role": "user",
-                    "content": get_local_time_info() + "\n" + query + platform_prompt,
-                },
-            ],
-            "stream": True,
-        }
+        messages = [
+            {"role": "system", "content": SEARCH_PROMPT},
+            {
+                "role": "user",
+                "content": get_local_time_info() + "\n" + query + platform_prompt,
+            },
+        ]
         await log_info(ctx, f"platform_prompt: {query + platform_prompt}", config.debug_enabled)
-        return await self._execute_stream_with_retry(payload, ctx)
 
-    async def _parse_streaming_response(self, response: httpx.Response, ctx: Any = None) -> str:
-        content = ""
-        full_body_buffer: list[str] = []
-        async for raw_line in response.aiter_lines():
-            line = raw_line.strip()
-            if not line:
+        counts = {primary: 0}
+        if fallback:
+            counts[fallback] = 0
+        last_failure = _AttemptFailure("upstream_unavailable", action="retry")
+        switched = False
+
+        for index, model in enumerate([primary] + ([fallback] if fallback else [])):
+            if model is None:
                 continue
-            full_body_buffer.append(line)
-            if not line.startswith("data:") or line in ("data: [DONE]", "data:[DONE]"):
-                continue
-            try:
-                data = json.loads(line[5:].lstrip())
-                choices = data.get("choices", [])
-                if choices:
-                    delta = choices[0].get("delta", {})
-                    if isinstance(delta.get("content"), str):
-                        content += delta["content"]
-            except (json.JSONDecodeError, IndexError, TypeError):
-                continue
+            if index == 1:
+                switched = True
+            for attempt_number in range(1, attempts_limit + 1):
+                counts[model] += 1
+                payload = {"model": model, "messages": messages, "stream": True}
+                try:
+                    result = await self._execute_stream(payload)
+                    await log_info(ctx, f"Grok model {model} completed", config.debug_enabled)
+                    return result
+                except _AttemptFailure as exc:
+                    last_failure = exc
+                    if exc.action == "fatal":
+                        raise self._final_error(
+                            primary,
+                            fallback,
+                            reported_fallback,
+                            counts,
+                            exc,
+                            switched,
+                        ) from exc
+                    if exc.action == "switch" or attempt_number >= attempts_limit:
+                        break
+                    await self._sleep(self._retry_delay(attempt_number, exc.retry_after))
+                except Exception as exc:
+                    last_failure = _AttemptFailure("client_error", action="fatal")
+                    raise self._final_error(
+                        primary,
+                        fallback,
+                        reported_fallback,
+                        counts,
+                        last_failure,
+                        switched,
+                    ) from exc
 
-        if not content and full_body_buffer:
-            try:
-                data = json.loads("".join(full_body_buffer))
-                choices = data.get("choices", [])
-                if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-            except (json.JSONDecodeError, AttributeError, IndexError, TypeError):
-                pass
+        raise self._final_error(
+            primary,
+            fallback,
+            reported_fallback,
+            counts,
+            last_failure,
+            switched,
+        )
 
-        await log_info(ctx, f"content: {content}", config.debug_enabled)
-        return content
+    def _final_error(
+        self,
+        primary: str,
+        fallback: str | None,
+        reported_fallback: str | None,
+        counts: dict[str, int],
+        failure: _AttemptFailure,
+        switched: bool,
+    ) -> GrokClientError:
+        if failure.error_type == "authentication_error":
+            code = "grok_authentication_error"
+            message = "Grok API 认证失败，请检查 GROK_API_KEY"
+        elif failure.error_type == "request_invalid":
+            code = "grok_request_invalid"
+            message = "Grok 请求参数无效，已停止重复请求"
+        elif fallback and switched:
+            code = "grok_primary_and_fallback_failed"
+            message = "Grok 主模型和备用模型均不可用"
+        else:
+            code = "grok_primary_failed"
+            message = (
+                "Grok 主模型调用失败，且未配置可用的不同备用模型"
+                if not fallback
+                else "Grok 主模型调用失败"
+            )
+        return GrokClientError(
+            code=code,
+            message=message,
+            primary_model=primary,
+            fallback_model=reported_fallback,
+            primary_attempts=counts.get(primary, 0),
+            fallback_attempts=counts.get(fallback, 0) if fallback else 0,
+            last_failure=failure,
+            switched_model=switched,
+        )
 
-    async def _execute_stream_with_retry(self, payload: dict[str, Any], ctx: Any = None) -> str:
-        timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            transport=self.transport,
-        ) as client:
-            async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(config.retry_max_attempts + 1),
-                wait=_WaitWithRetryAfter(config.retry_multiplier, config.retry_max_wait),
-                retry=retry_if_exception(_is_retryable_exception),
-                reraise=True,
-            ):
-                with attempt:
-                    async with client.stream(
-                        "POST",
-                        f"{self.api_url}/chat/completions",
-                        headers=self.headers,
-                        json=payload,
-                    ) as response:
-                        response.raise_for_status()
-                        return await self._parse_streaming_response(response, ctx)
-        return ""
+    def _retry_delay(self, attempt_number: int, retry_after: float | None) -> float:
+        base = min(
+            float(config.retry_max_wait),
+            float(config.retry_multiplier) * (2 ** (attempt_number - 1)),
+        )
+        delay = base * (0.5 + 0.5 * min(1.0, max(0.0, self._random())))
+        return max(delay, retry_after or 0.0)
+
+    async def _execute_stream(self, payload: dict[str, Any]) -> str:
+        try:
+            client = await self._get_client()
+            async with client.stream(
+                "POST",
+                "/chat/completions",
+                headers=self.headers,
+                json=payload,
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    raise self._classify_response(response)
+                return await self._parse_streaming_response(response)
+        except _AttemptFailure:
+            raise
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            raise _AttemptFailure("connection_failure", action="retry") from exc
+        except httpx.ReadTimeout as exc:
+            raise _AttemptFailure("read_timeout", action="retry") from exc
+        except httpx.TimeoutException as exc:
+            raise _AttemptFailure("timeout", action="retry") from exc
+        except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.RequestError) as exc:
+            raise _AttemptFailure("network_failure", action="retry") from exc
+
+    async def _parse_streaming_response(self, response: httpx.Response) -> str:
+        content: list[str] = []
+        body_lines: list[str] = []
+        saw_sse = False
+        completed = False
+        try:
+            async for raw_line in response.aiter_lines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                body_lines.append(line)
+                if not line.startswith("data:"):
+                    continue
+                saw_sse = True
+                payload_text = line[5:].lstrip()
+                if payload_text == "[DONE]":
+                    completed = True
+                    continue
+                try:
+                    data = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict) and isinstance(data.get("error"), dict):
+                    raise self._classify_error_data(data, response.status_code)
+                choices = data.get("choices", []) if isinstance(data, dict) else []
+                if not choices or not isinstance(choices[0], dict):
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta", {})
+                if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                    content.append(delta["content"])
+                if choice.get("finish_reason") is not None:
+                    completed = True
+        except _AttemptFailure:
+            raise
+        except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.NetworkError) as exc:
+            result = "".join(content)
+            if completed and result.strip():
+                return result
+            error_type = "stream_interrupted_after_content" if content else "stream_interrupted"
+            raise _AttemptFailure(error_type, action="retry") from exc
+
+        if saw_sse:
+            if not completed:
+                error_type = "stream_interrupted_after_content" if content else "stream_interrupted"
+                raise _AttemptFailure(error_type, action="retry")
+            result = "".join(content)
+            if result.strip():
+                return result
+            raise _AttemptFailure("empty_response", action="retry")
+
+        raw_body = "\n".join(body_lines)
+        try:
+            data = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise _AttemptFailure("invalid_response", action="retry") from exc
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            raise self._classify_error_data(data, response.status_code)
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message", {})
+            result = message.get("content", "") if isinstance(message, dict) else ""
+            if isinstance(result, str) and result.strip():
+                return result
+        raise _AttemptFailure("empty_response", action="retry")
+
+    def _classify_response(self, response: httpx.Response) -> _AttemptFailure:
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        return self._classify_error_data(data, response.status_code, response.headers)
+
+    def _classify_error_data(
+        self,
+        data: object,
+        status: int,
+        headers: httpx.Headers | None = None,
+    ) -> _AttemptFailure:
+        code, error_type, message = self._error_fields(data)
+        combined = " ".join(part for part in (code, error_type, message) if part).lower()
+        upstream_code = self._safe_upstream_code(code or error_type)
+
+        if self._matches(combined, _RELAY_ACCOUNT_PATTERNS):
+            return _AttemptFailure(
+                "relay_upstream_account_unavailable",
+                action="retry",
+                http_status=status,
+                upstream_code=upstream_code,
+                retry_after=self._parse_retry_after(headers),
+            )
+        if self._matches(combined, _MODEL_NOT_FOUND_PATTERNS):
+            return _AttemptFailure(
+                "model_not_found",
+                action="switch",
+                http_status=status,
+                upstream_code=upstream_code,
+            )
+        if self._matches(combined, _MODEL_PERMISSION_PATTERNS):
+            return _AttemptFailure(
+                "model_permission_denied",
+                action="switch",
+                http_status=status,
+                upstream_code=upstream_code,
+            )
+        if self._matches(combined, _MODEL_UNAVAILABLE_PATTERNS):
+            return _AttemptFailure(
+                "model_unavailable",
+                action="switch",
+                http_status=status,
+                upstream_code=upstream_code,
+            )
+        if status in {401, 403} or self._matches(combined, _AUTH_PATTERNS):
+            return _AttemptFailure(
+                "authentication_error",
+                action="fatal",
+                http_status=status,
+                upstream_code=upstream_code,
+            )
+        if status in {400, 422}:
+            return _AttemptFailure(
+                "request_invalid",
+                action="fatal",
+                http_status=status,
+                upstream_code=upstream_code,
+            )
+        if status == 408 or status == 429 or 500 <= status < 600:
+            return _AttemptFailure(
+                "upstream_unavailable" if status != 429 else "rate_limited",
+                action="retry",
+                http_status=status,
+                upstream_code=upstream_code,
+                retry_after=self._parse_retry_after(headers),
+            )
+        return _AttemptFailure(
+            "upstream_rejected",
+            action="fatal",
+            http_status=status,
+            upstream_code=upstream_code,
+        )
+
+    @staticmethod
+    def _error_fields(data: object) -> tuple[str, str, str]:
+        if not isinstance(data, dict):
+            return "", "", ""
+        error = data.get("error", data)
+        if not isinstance(error, dict):
+            return "", "", str(error) if isinstance(error, str) else ""
+        return tuple(
+            value if isinstance(value, str) else ""
+            for value in (error.get("code"), error.get("type"), error.get("message"))
+        )
+
+    @staticmethod
+    def _matches(text: str, patterns: tuple[str, ...]) -> bool:
+        return any(pattern in text for pattern in patterns)
+
+    def _safe_upstream_code(self, value: str) -> str | None:
+        if not value:
+            return None
+        value = value.replace(self.api_key, "[REDACTED]")
+        value = re.sub(r"(?i)bearer\s+[a-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+        value = re.sub(r"[^a-zA-Z0-9_.:-]", "_", value)[:80]
+        return value or None
+
+    @staticmethod
+    def _parse_retry_after(headers: httpx.Headers | None) -> float | None:
+        if headers is None:
+            return None
+        header = headers.get("Retry-After")
+        if not header:
+            return None
+        header = header.strip()
+        try:
+            return max(0.0, float(header))
+        except ValueError:
+            pass
+        try:
+            retry_dt = parsedate_to_datetime(header)
+            if retry_dt.tzinfo is None:
+                retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            return None

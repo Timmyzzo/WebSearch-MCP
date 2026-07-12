@@ -57,7 +57,7 @@ uv run python -m build
 
 ## 4. 当前阶段边界
 
-P0、P1 和 P2 已完成。P2 实现包括：
+P0、P1、P2 和 P3 已完成。P2 实现包括：
 
 - 多 Key 正常轮询与共享健康状态。
 - 错误分类和 `Retry-After` 解析。
@@ -70,7 +70,16 @@ P0、P1 和 P2 已完成。P2 实现包括：
 
 可靠性配置为 `TAVILY_KEY_COOLDOWN`、`TAVILY_QUOTA_COOLDOWN`、`TAVILY_SERVICE_FAILURE_THRESHOLD` 和 `TAVILY_SERVICE_COOLDOWN`。
 
-P2 没有实现 Grok 主备模型，没有统一全项目 `success`/`partial_success`/`error` 协议，也没有调整暂缓的敏感日志和日志轮转策略。这些仍属于后续阶段。
+P3 在不提前实现 P4 统一协议的前提下增加了：
+
+- `GROK_PRIMARY_MODEL`、`GROK_FALLBACK_MODEL` 和每模型实际请求上限。
+- `GROK_MODEL` 到主模型的兼容映射、空值处理和相同主备模型去重。
+- Grok 进程级共享 `httpx.AsyncClient`、连接池与 FastMCP lifespan 关闭。
+- 按 HTTP 状态和 OpenAI 兼容错误对象分类的重试、提前切换和直接失败。
+- 流式响应完成性校验，以及不会缓存或返回残缺流的结构化最终错误。
+- 主备模型独立尝试计数、随机抖动指数退避和 stdio 错误后存活测试。
+
+P3 没有统一全项目 `success`/`partial_success`/`error` 协议，没有重构搜索 Prompt，也没有执行 P6 的真实客户端人工验收。敏感日志缩减、日志轮转和其他路线图暂缓事项仍未实现。
 
 ## 5. 提交前检查
 

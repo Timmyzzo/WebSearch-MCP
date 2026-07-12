@@ -1,16 +1,36 @@
 from grok_search.clients.tavily import TavilyClientError
 from grok_search.models import TavilyMapResult, TavilySearchResult
+from grok_search.tools import configuration as configuration_tools
 from grok_search.tools import web as web_tools
 
 
 class FakeGrokClient:
-    async def search(self, query, platform=""):
+    async def search(self, query, platform="", **kwargs):
         return "Answer\n\nSources:\n- [Official](https://example.com/official)"
 
 
 class FailingGrokClient:
-    async def search(self, query, platform=""):
-        raise RuntimeError("grok unavailable")
+    async def search(self, query, platform="", **kwargs):
+        from grok_search.clients.grok import GrokClientError, _AttemptFailure
+
+        raise GrokClientError(
+            code="grok_primary_and_fallback_failed",
+            message="Grok 主模型和备用模型均不可用",
+            primary_model="primary",
+            fallback_model="fallback",
+            primary_attempts=2,
+            fallback_attempts=2,
+            last_failure=_AttemptFailure("upstream_unavailable", action="retry", http_status=503),
+            switched_model=True,
+        )
+
+
+class FakeClosableGrokClient:
+    def __init__(self):
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
 
 
 class FakeTavilyClient:
@@ -128,5 +148,62 @@ async def test_web_search_does_not_return_empty_success_when_both_providers_fail
 
     assert result.content == ""
     assert result.partial is False
-    assert result.error == "tavily_all_keys_unavailable"
+    assert result.error == "grok_primary_and_fallback_failed"
+    assert result.grok_error is not None
+    assert result.grok_error.total_attempts == 4
     assert result.tavily_error is not None
+
+
+async def test_tavily_success_does_not_masquerade_as_grok_answer(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://grok.example/v1")
+    monkeypatch.setenv("GROK_API_KEY", "secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-secret")
+    monkeypatch.setattr(web_tools, "_new_grok_client", lambda *args: FailingGrokClient())
+    monkeypatch.setattr(web_tools, "_new_tavily_client", lambda: FakeTavilyClient())
+
+    result = await web_tools.web_search("question", extra_sources=2)
+    sources = await web_tools.get_sources(result.session_id)
+
+    assert result.content == ""
+    assert result.error == "grok_primary_and_fallback_failed"
+    assert result.sources_count == 0
+    assert sources.sources == []
+    assert result.tavily_error is None
+
+
+async def test_shared_grok_client_pool_is_reused_and_closed(monkeypatch):
+    monkeypatch.setattr(web_tools, "_new_grok_client", lambda *args: FakeClosableGrokClient())
+
+    first = await web_tools._get_grok_client("https://grok.example/v1", "secret")
+    second = await web_tools._get_grok_client("https://grok.example/v1", "secret")
+    await web_tools.close_grok_client()
+
+    assert first is second
+    assert first.closed is True
+
+
+async def test_switch_model_persists_and_changes_primary_model(tmp_path):
+    from grok_search.config import config
+
+    config._config_file = tmp_path / "config.json"
+    config._cached_model = None
+
+    result = await configuration_tools.switch_model("new-primary")
+
+    assert result.success is True
+    assert result.current_model == "new-primary"
+    assert "主模型" in result.message
+    saved = config._load_config_file()
+    assert saved["primary_model"] == "new-primary"
+    assert saved["model"] == "new-primary"
+
+
+async def test_invalid_model_attempt_configuration_is_structured(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://grok.example/v1")
+    monkeypatch.setenv("GROK_API_KEY", "secret")
+    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "0")
+
+    result = await web_tools.web_search("question")
+
+    assert result.error == "grok_configuration_error"
+    assert "GROK_MODEL_MAX_ATTEMPTS" in result.content

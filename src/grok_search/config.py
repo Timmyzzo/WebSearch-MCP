@@ -59,8 +59,17 @@ class Config:
         return os.getenv("GROK_DEBUG", "false").lower() in ("true", "1", "yes")
 
     @property
-    def retry_max_attempts(self) -> int:
-        return int(os.getenv("GROK_RETRY_MAX_ATTEMPTS", "3"))
+    def grok_model_max_attempts(self) -> int:
+        raw = os.getenv("GROK_MODEL_MAX_ATTEMPTS", "").strip()
+        if not raw:
+            return 3
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError("GROK_MODEL_MAX_ATTEMPTS 必须是正整数") from exc
+        if value < 1:
+            raise ValueError("GROK_MODEL_MAX_ATTEMPTS 必须大于或等于 1")
+        return value
 
     @property
     def retry_multiplier(self) -> float:
@@ -179,22 +188,57 @@ class Config:
             return f"{model}:online"
         return model
 
+    @staticmethod
+    def _non_empty(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    def normalize_model(self, model: str) -> str:
+        normalized = self._non_empty(model)
+        if normalized is None:
+            raise ValueError("模型名称不能为空")
+        return self._apply_model_suffix(normalized)
+
     @property
-    def grok_model(self) -> str:
+    def grok_primary_model(self) -> str:
         if self._cached_model is not None:
             return self._cached_model
 
+        file_config = self._load_config_file()
         model = (
-            os.getenv("GROK_MODEL") or self._load_config_file().get("model") or self._DEFAULT_MODEL
+            self._non_empty(os.getenv("GROK_PRIMARY_MODEL"))
+            or self._non_empty(os.getenv("GROK_MODEL"))
+            or self._non_empty(file_config.get("primary_model"))
+            or self._non_empty(file_config.get("model"))
+            or self._DEFAULT_MODEL
         )
         self._cached_model = self._apply_model_suffix(model)
         return self._cached_model
 
+    @property
+    def grok_fallback_model(self) -> str | None:
+        file_config = self._load_config_file()
+        model = self._non_empty(os.getenv("GROK_FALLBACK_MODEL")) or self._non_empty(
+            file_config.get("fallback_model")
+        )
+        return self._apply_model_suffix(model) if model else None
+
+    @property
+    def grok_model(self) -> str:
+        """兼容旧调用：GROK_MODEL 始终表示当前主模型。"""
+        return self.grok_primary_model
+
     def set_model(self, model: str) -> None:
+        normalized = self._non_empty(model)
+        if normalized is None:
+            raise ValueError("模型名称不能为空")
         config_data = self._load_config_file()
-        config_data["model"] = model
+        config_data["primary_model"] = normalized
+        config_data["model"] = normalized
         self._save_config_file(config_data)
-        self._cached_model = self._apply_model_suffix(model)
+        self._cached_model = self._apply_model_suffix(normalized)
 
     @staticmethod
     def _mask_api_key(key: str) -> str:
@@ -214,6 +258,7 @@ class Config:
         try:
             api_url = self.grok_api_url
             api_key_raw = self.grok_api_key
+            api_url = api_url.replace(api_key_raw, "[REDACTED]")
             api_key_masked = self._mask_api_key(api_key_raw)
             config_status = "✅ 配置完整"
         except ValueError as e:
@@ -221,9 +266,18 @@ class Config:
             api_key_masked = "未配置"
             config_status = f"❌ 配置错误: {str(e)}"
 
+        try:
+            max_attempts: int | str = self.grok_model_max_attempts
+        except ValueError as exc:
+            max_attempts = f"配置错误: {exc}"
+            config_status = f"❌ 配置错误: {exc}"
+
         return {
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
+            "GROK_PRIMARY_MODEL": self.grok_primary_model,
+            "GROK_FALLBACK_MODEL": self.grok_fallback_model or "未配置",
+            "GROK_MODEL_MAX_ATTEMPTS": max_attempts,
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,
