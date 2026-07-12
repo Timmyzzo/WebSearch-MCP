@@ -33,7 +33,8 @@ Typical uses include retrieving current official documentation, producing answer
 - P1 legacy crawler removal and modularization: complete.
 - P2 Tavily multi-key reliability: complete.
 - P3 Grok primary/fallback models and retries: complete.
-- Next: P4 unified response protocol.
+- P4 unified response protocol: complete.
+- Next: P5 search prompt and quality work.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
 
@@ -117,16 +118,93 @@ Primary-model precedence is: a model selected by `switch_model` in the current p
 
 ## Tool overview
 
-| Tool | Purpose | Main response fields |
+| Tool | Purpose | Tool-specific fields |
 | --- | --- | --- |
-| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `error`, `grok_error` |
-| `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count`, `error` |
-| `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `error` |
-| `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `error` |
+| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `grok_error`, `tavily_error` |
+| `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count` |
+| `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `tavily_error` |
+| `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `tavily_error` |
 | `get_config_info` | Return masked configuration and test Grok | `configuration`, `connection_test` |
 | `switch_model` | Persist and select the primary Grok model | `success`, `previous_model`, `current_model` |
 
-`query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
+Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
+
+## Unified response protocol
+
+`status` has exactly three stable values:
+
+- `success`: the tool goal completed. An empty source list is valid when Grok returned a real answer without citations.
+- `partial_success`: useful output is available, but a supplemental component or non-critical step failed. Examples include Grok succeeding while Tavily fails, an incomplete planning session, or a site map with ignored invalid entries.
+- `error`: the tool goal did not complete. Empty answers, empty extracted content, empty URL maps, configuration errors, and upstream failures never masquerade as success.
+
+| Tool | `success` | `partial_success` | `error` and empty results |
+| --- | --- | --- | --- |
+| `web_search` | Grok returns a non-empty valid answer; sources may be empty. | Grok succeeds but requested Tavily supplementation fails. | Final Grok failure, interrupted stream, invalid/empty answer, or configuration failure; Tavily cannot replace the Grok answer. |
+| `get_sources` | The session exists; `sources=[]` is a valid empty result. | Only part of the cached source data validates. | Missing/expired session or cache-component failure. |
+| `web_fetch` | Tavily returns non-empty Markdown. | Single-URL extraction is atomic, so partial success is not currently applicable. | Configuration, authentication, rate limit, service, request errors, or `tavily_no_content` after a successful empty upstream result. |
+| `web_map` | At least one URL is returned and the response is complete. | URLs are available, but the base URL is missing or invalid entries were ignored. | Tavily failure or `tavily_no_urls` after a successful empty upstream result. |
+| `get_config_info` | Masked configuration and the Grok connection test both succeed. | Configuration is usable, but connectivity/authentication/config validation fails. | Even the masked configuration object cannot be built. |
+| `switch_model` | The primary model is written to the process and compatibility config. | The write is atomic, so partial success is not currently applicable. | Empty model or persistence failure; it still changes only the primary model. |
+| Planning tools | Required phases are complete and an executable plan exists. | The session is valid but required phases remain. | Missing session, invalid JSON parameters, or planning-component failure. |
+
+The canonical error object is `error_detail`:
+
+```json
+{
+  "code": "tavily_service_unavailable",
+  "message": "Tavily is temporarily unavailable",
+  "service": "tavily",
+  "retryable": true,
+  "http_status": 503,
+  "upstream_code": "upstream_unavailable",
+  "diagnostics": {
+    "service_circuit": {"state": "open", "retry_after_seconds": 30}
+  }
+}
+```
+
+Diagnostics contain only necessary redacted data. They exclude Grok and Tavily keys, Authorization headers, response bodies that may echo credentials, Python tracebacks, and internal object representations. A structured error ends only the current call; the stdio MCP process remains available for discovery and later calls.
+
+Compatibility mapping:
+
+| Legacy field | P4 mapping |
+| --- | --- |
+| `error` | Preserved as the legacy string code or message. New callers should read `error_detail`. |
+| `partial` | `true` when `status="partial_success"`; otherwise defaults to `false`. |
+| `tavily_error` | Preserves P2 key-state and service-circuit summaries and adds retry/HTTP/upstream fields. |
+| `grok_error` | Preserves P3 model names, real attempt counts, final classification, and switch state. |
+| `content`, `results`, `success` | Preserved per tool; use `status` as the authoritative outcome. |
+
+Typical responses follow.
+
+`web_search` succeeds even when a valid answer has no sources:
+
+```json
+{"status":"success","session_id":"abc123","content":"A valid answer","sources_count":0,"error":null,"error_detail":null,"partial":false}
+```
+
+Grok succeeds but supplemental Tavily search fails:
+
+```json
+{"status":"partial_success","session_id":"abc123","content":"A valid answer","sources_count":0,"partial":true,"error":null,"error_detail":{"code":"tavily_all_keys_unavailable","message":"All Tavily keys are unavailable","service":"tavily","retryable":false,"http_status":401,"upstream_code":"invalid_api_key","diagnostics":{"key_statuses":[{"fingerprint":"tvly…1234","state":"invalid"}]}},"tavily_error":{"code":"tavily_all_keys_unavailable","message":"All Tavily keys are unavailable"}}
+```
+
+If Grok ultimately fails, successful Tavily results never become a fake Grok answer:
+
+```json
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_and_fallback_failed","error_detail":{"code":"grok_primary_and_fallback_failed","message":"Both Grok models are unavailable","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":3,"fallback_attempts":3,"total_attempts":6}},"partial":false}
+```
+
+Other tool examples:
+
+```jsonl
+{"tool":"get_sources","status":"success","session_id":"abc123","sources":[],"sources_count":0}
+{"tool":"web_fetch","status":"success","url":"https://example.com","content":"# Page","provider":"tavily"}
+{"tool":"web_map","status":"error","base_url":"https://example.com","results":[],"error_detail":{"code":"tavily_no_urls","message":"Tavily succeeded but found no URLs","service":"tavily","retryable":false,"http_status":null,"upstream_code":null,"diagnostics":{"upstream_succeeded":true,"empty_result":true}}}
+{"tool":"get_config_info","status":"partial_success","partial":true,"configuration":{"GROK_API_KEY":"not configured"},"connection_test":{"status":"configuration error"},"error_detail":{"code":"grok_configuration_error","message":"GROK_API_KEY is not configured","service":"grok","retryable":false,"http_status":null,"upstream_code":null,"diagnostics":{"configuration":"grok"}}}
+{"tool":"switch_model","status":"success","success":true,"previous_model":"grok-4-fast","current_model":"grok-3-mini","message":"Primary model changed"}
+{"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"The search plan is incomplete","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
+```
 
 ## Grok primary/fallback models and retries
 
@@ -155,7 +233,7 @@ Healthy keys are selected fairly in round-robin order, and Search, Extract, and 
 
 HTTP 401/403 disables the current key. HTTP 429 is classified using Tavily error data, response text, and `Retry-After`. HTTP 400/422 returns immediately without consuming every key, while HTTP 404 reports an API URL/version configuration problem. Matching 5xx or network failures from distinct keys open a service-level circuit breaker; after cooldown, only one half-open probe is allowed.
 
-When every key is unavailable, `web_fetch` and `web_map` return `tavily_all_keys_unavailable` with masked key states. `web_search` preserves any Grok answer but sets `partial=true` and includes `tavily_error`. Only the current tool call fails; the MCP process remains alive.
+When every key is unavailable, `web_fetch` and `web_map` return `status="error"`, `tavily_all_keys_unavailable`, and masked key states. `web_search` preserves any Grok answer with `status="partial_success"`, `partial=true`, and `tavily_error`. Only the current tool call ends; the MCP process remains alive.
 
 ## Troubleshooting
 

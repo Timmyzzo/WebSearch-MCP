@@ -9,15 +9,18 @@ from ..clients import GrokClient, GrokClientError, TavilyClient, TavilyClientErr
 from ..config import config
 from ..logger import log_info
 from ..models import (
+    ErrorDetail,
     GrokErrorDetail,
     Source,
     SourcesResponse,
     TavilyErrorDetail,
+    TavilyMapResult,
     TavilySearchResult,
     WebFetchResponse,
     WebMapResponse,
     WebSearchResponse,
 )
+from ..protocol import error_from_grok, error_from_tavily, internal_error_detail, make_error_detail
 from ..sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
 
 _SOURCES_CACHE = SourcesCache(max_size=256)
@@ -82,16 +85,43 @@ def _tavily_error_detail(exc: TavilyClientError) -> TavilyErrorDetail:
     return TavilyErrorDetail.model_validate(exc.to_dict())
 
 
+def _legacy_error(detail: ErrorDetail) -> str:
+    return detail.code
+
+
+def _unexpected_error(service: str, exc: BaseException) -> ErrorDetail:
+    return internal_error_detail(service, exc)
+
+
+def _grok_catalog_error(exc: BaseException) -> ErrorDetail:
+    error_type = getattr(exc, "error_type", "")
+    code = {
+        "authentication_error": "grok_authentication_error",
+        "request_invalid": "grok_request_invalid",
+    }.get(error_type, "grok_model_catalog_error")
+    message = (
+        "Grok API 认证失败，请检查 GROK_API_KEY"
+        if error_type == "authentication_error"
+        else "无法读取 Grok 模型列表"
+    )
+    return make_error_detail(
+        code=code,
+        message=message,
+        service="grok",
+        retryable=getattr(exc, "action", "fatal") in {"retry", "switch"},
+        http_status=getattr(exc, "http_status", None),
+        upstream_code=getattr(exc, "upstream_code", None),
+        diagnostics={"operation": "list_models", "exception_type": type(exc).__name__},
+    )
+
+
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
     key = (api_url, api_key)
     async with _AVAILABLE_MODELS_LOCK:
         if key in _AVAILABLE_MODELS_CACHE:
             return _AVAILABLE_MODELS_CACHE[key]
 
-    try:
-        models = await (await _get_grok_client(api_url, api_key)).list_models()
-    except Exception:
-        models = []
+    models = await (await _get_grok_client(api_url, api_key)).list_models()
 
     async with _AVAILABLE_MODELS_LOCK:
         _AVAILABLE_MODELS_CACHE[key] = models
@@ -119,9 +149,9 @@ def _extra_results_to_sources(results: list[TavilySearchResult]) -> list[dict[st
     name="web_search",
     description=(
         "Search the web with Grok and optionally add structured Tavily sources. "
-        "Returns a session_id, answer content, and cached source count."
+        "Returns unified status/error_detail fields plus a session_id and answer content."
     ),
-    meta={"version": "2.2.0"},
+    meta={"version": "3.0.0"},
 )
 async def web_search(
     query: Annotated[str, Field(description="Clear, self-contained search query.", min_length=1)],
@@ -146,32 +176,59 @@ async def web_search(
         configured_fallback = config.grok_fallback_model
         max_attempts = config.grok_model_max_attempts
     except ValueError as exc:
-        await _SOURCES_CACHE.set(session_id, [])
         message = f"配置错误: {exc}"
+        detail = make_error_detail(
+            code="grok_configuration_error",
+            message=message,
+            service="grok",
+            retryable=False,
+            diagnostics={"configuration": "grok"},
+        )
         return WebSearchResponse(
+            status="error",
             session_id=session_id,
             content=message,
             sources_count=0,
-            error="grok_configuration_error",
+            error=_legacy_error(detail),
+            error_detail=detail,
         )
 
     effective_model = configured_primary
     if model:
-        available = await _get_available_models_cached(api_url, api_key)
-        if available and model not in available:
-            await _SOURCES_CACHE.set(session_id, [])
+        try:
+            available = await _get_available_models_cached(api_url, api_key)
+        except Exception as exc:
+            detail = _grok_catalog_error(exc)
             return WebSearchResponse(
+                status="error",
+                session_id=session_id,
+                content="",
+                sources_count=0,
+                error=_legacy_error(detail),
+                error_detail=detail,
+            )
+        if available and model not in available:
+            detail = make_error_detail(
+                code="invalid_model",
+                message=f"无效模型: {model}",
+                service="grok",
+                retryable=False,
+                diagnostics={"requested_model": model},
+            )
+            return WebSearchResponse(
+                status="error",
                 session_id=session_id,
                 content=f"无效模型: {model}",
                 sources_count=0,
-                error="invalid_model",
+                error=_legacy_error(detail),
+                error_detail=detail,
             )
         effective_model = config.normalize_model(model)
 
     grok_client = await _get_grok_client(api_url, api_key)
-    tavily_count = extra_sources if config.tavily_api_keys else 0
+    tavily_count = extra_sources
 
-    async def safe_grok() -> tuple[str | None, GrokClientError | None]:
+    async def safe_grok() -> tuple[str | None, GrokErrorDetail | None, ErrorDetail | None]:
         try:
             result = await grok_client.search(
                 query,
@@ -180,69 +237,156 @@ async def web_search(
                 fallback_model=configured_fallback,
                 max_attempts=max_attempts,
             )
-            return result, None
+            return result, None, None
         except GrokClientError as exc:
-            return None, exc
+            detail = GrokErrorDetail.model_validate(exc.to_dict())
+            return None, detail, error_from_grok(detail)
+        except Exception as exc:
+            return None, None, _unexpected_error("grok", exc)
 
-    async def safe_tavily() -> tuple[list[TavilySearchResult], TavilyClientError | None]:
+    async def safe_tavily(
+    ) -> tuple[list[TavilySearchResult], TavilyErrorDetail | None, ErrorDetail | None]:
         if not tavily_count:
-            return [], None
+            return [], None, None
         try:
-            return await _new_tavily_client().search(query, tavily_count), None
+            return await _new_tavily_client().search(query, tavily_count), None, None
         except TavilyClientError as exc:
-            return [], exc
+            detail = _tavily_error_detail(exc)
+            return [], detail, error_from_tavily(detail)
+        except Exception as exc:
+            return [], None, _unexpected_error("tavily", exc)
 
     grok_outcome, tavily_outcome = await asyncio.gather(safe_grok(), safe_tavily())
-    grok_result, grok_error = grok_outcome
-    tavily_results, tavily_error = tavily_outcome
-    if grok_error is not None:
-        await _SOURCES_CACHE.set(session_id, [])
+    grok_result, grok_error, grok_error_detail = grok_outcome
+    tavily_results, tavily_error, tavily_error_detail = tavily_outcome
+    if grok_error_detail is not None:
+        if tavily_error_detail is not None:
+            grok_error_detail.diagnostics["component_errors"] = {
+                "tavily": tavily_error_detail.model_dump()
+            }
         return WebSearchResponse(
+            status="error",
             session_id=session_id,
             content="",
             sources_count=0,
-            error=grok_error.code,
-            grok_error=GrokErrorDetail.model_validate(grok_error.to_dict()),
-            tavily_error=_tavily_error_detail(tavily_error) if tavily_error else None,
+            error=_legacy_error(grok_error_detail),
+            error_detail=grok_error_detail,
+            grok_error=grok_error,
+            tavily_error=tavily_error,
         )
-    answer, grok_sources = split_answer_and_sources(grok_result or "")
+    if not isinstance(grok_result, str):
+        detail = make_error_detail(
+            code="grok_invalid_response",
+            message="Grok 返回了无效响应类型，当前结果未缓存",
+            service="grok",
+            retryable=True,
+            diagnostics={"response_type": type(grok_result).__name__},
+        )
+        return WebSearchResponse(
+            status="error",
+            session_id=session_id,
+            content="",
+            sources_count=0,
+            error=_legacy_error(detail),
+            error_detail=detail,
+            tavily_error=tavily_error,
+        )
+    answer, grok_sources = split_answer_and_sources(grok_result)
+    if not answer.strip():
+        detail = make_error_detail(
+            code="grok_empty_answer",
+            message="Grok 响应未包含有效答案，当前结果未缓存",
+            service="grok",
+            retryable=True,
+            diagnostics={"upstream_succeeded": True},
+        )
+        return WebSearchResponse(
+            status="error",
+            session_id=session_id,
+            content="",
+            sources_count=0,
+            error=_legacy_error(detail),
+            error_detail=detail,
+            tavily_error=tavily_error,
+        )
     all_sources = merge_sources(grok_sources, _extra_results_to_sources(tavily_results))
     await _SOURCES_CACHE.set(session_id, all_sources)
 
+    is_partial = tavily_error_detail is not None
     return WebSearchResponse(
+        status="partial_success" if is_partial else "success",
         session_id=session_id,
         content=answer,
         sources_count=len(all_sources),
-        partial=tavily_error is not None and bool(answer or grok_sources),
-        error=(
-            tavily_error.code
-            if tavily_error is not None and not (answer or grok_sources)
-            else None
-        ),
-        tavily_error=_tavily_error_detail(tavily_error) if tavily_error else None,
+        partial=is_partial,
+        error_detail=tavily_error_detail,
+        tavily_error=tavily_error,
     )
 
 
 @mcp.tool(
     name="get_sources",
     description="Retrieve cached sources for a previous web_search session_id.",
-    meta={"version": "1.1.0"},
+    meta={"version": "2.0.0"},
 )
 async def get_sources(
     session_id: Annotated[
         str, Field(description="Session ID returned by web_search.", min_length=1)
     ],
 ) -> SourcesResponse:
-    sources = await _SOURCES_CACHE.get(session_id)
-    if sources is None:
+    try:
+        sources = await _SOURCES_CACHE.get(session_id)
+    except Exception as exc:
+        detail = _unexpected_error("sources_cache", exc)
         return SourcesResponse(
+            status="error",
             session_id=session_id,
             sources=[],
             sources_count=0,
-            error="session_id_not_found_or_expired",
+            error=_legacy_error(detail),
+            error_detail=detail,
         )
-    normalized = [Source.model_validate(source) for source in sources]
+    if sources is None:
+        detail = make_error_detail(
+            code="session_id_not_found_or_expired",
+            message="未找到该搜索会话，session_id 可能无效或已过期",
+            service="sources_cache",
+            retryable=False,
+            diagnostics={"session_id": session_id},
+        )
+        return SourcesResponse(
+            status="error",
+            session_id=session_id,
+            sources=[],
+            sources_count=0,
+            error=_legacy_error(detail),
+            error_detail=detail,
+        )
+    normalized: list[Source] = []
+    invalid_count = 0
+    for source in sources:
+        try:
+            normalized.append(Source.model_validate(source))
+        except Exception:
+            invalid_count += 1
+    if invalid_count:
+        detail = make_error_detail(
+            code="sources_partially_invalid",
+            message="部分缓存来源格式无效，已返回其余有效来源",
+            service="sources_cache",
+            retryable=False,
+            diagnostics={"invalid_sources": invalid_count},
+        )
+        return SourcesResponse(
+            status="partial_success",
+            session_id=session_id,
+            sources=normalized,
+            sources_count=len(normalized),
+            partial=True,
+            error_detail=detail,
+        )
     return SourcesResponse(
+        status="success",
         session_id=session_id,
         sources=normalized,
         sources_count=len(normalized),
@@ -252,7 +396,7 @@ async def get_sources(
 @mcp.tool(
     name="web_fetch",
     description="Extract a web page as Markdown using Tavily Extract.",
-    meta={"version": "1.4.0"},
+    meta={"version": "2.0.0"},
 )
 async def web_fetch(
     url: Annotated[
@@ -266,24 +410,49 @@ async def web_fetch(
         content = await _new_tavily_client().extract(url)
     except TavilyClientError as exc:
         await log_info(ctx, "Fetch Failed!", config.debug_enabled)
+        tavily_detail = _tavily_error_detail(exc)
+        detail = error_from_tavily(tavily_detail)
         return WebFetchResponse(
+            status="error",
             url=url,
             error=exc.message,
-            tavily_error=_tavily_error_detail(exc),
+            error_detail=detail,
+            tavily_error=tavily_detail,
+        )
+    except Exception as exc:
+        await log_info(ctx, "Fetch Failed!", config.debug_enabled)
+        detail = _unexpected_error("tavily", exc)
+        return WebFetchResponse(
+            status="error",
+            url=url,
+            error=_legacy_error(detail),
+            error_detail=detail,
         )
 
-    if content:
+    if isinstance(content, str) and content.strip():
         await log_info(ctx, "Fetch Finished (Tavily)!", config.debug_enabled)
-        return WebFetchResponse(url=url, content=content, provider="tavily")
+        return WebFetchResponse(status="success", url=url, content=content, provider="tavily")
 
     await log_info(ctx, "Fetch Failed!", config.debug_enabled)
-    return WebFetchResponse(url=url, error="提取失败: Tavily 未能获取内容")
+    detail = make_error_detail(
+        code="tavily_no_content",
+        message="Tavily 请求成功，但该 URL 没有可提取内容",
+        service="tavily",
+        retryable=False,
+        diagnostics={"upstream_succeeded": True, "empty_result": True},
+    )
+    return WebFetchResponse(
+        status="error",
+        url=url,
+        error=detail.message,
+        error_detail=detail,
+    )
 
 
 @mcp.tool(
     name="web_map",
     description="Discover a website's URL structure using Tavily Map.",
-    meta={"version": "1.4.0"},
+    meta={"version": "2.0.0"},
 )
 async def web_map(
     url: Annotated[
@@ -315,5 +484,70 @@ async def web_map(
             timeout=timeout,
         )
     except TavilyClientError as exc:
-        return WebMapResponse(error=exc.message, tavily_error=_tavily_error_detail(exc))
-    return WebMapResponse(**result.model_dump())
+        tavily_detail = _tavily_error_detail(exc)
+        return WebMapResponse(
+            status="error",
+            error=exc.message,
+            error_detail=error_from_tavily(tavily_detail),
+            tavily_error=tavily_detail,
+        )
+    except Exception as exc:
+        detail = _unexpected_error("tavily", exc)
+        return WebMapResponse(
+            status="error",
+            error=_legacy_error(detail),
+            error_detail=detail,
+        )
+
+    if not isinstance(result, TavilyMapResult):
+        detail = make_error_detail(
+            code="tavily_invalid_response",
+            message="Tavily Map 返回了无效响应类型",
+            service="tavily",
+            retryable=True,
+            diagnostics={"response_type": type(result).__name__},
+        )
+        return WebMapResponse(
+            status="error",
+            error=_legacy_error(detail),
+            error_detail=detail,
+        )
+
+    if not result.results:
+        detail = make_error_detail(
+            code="tavily_no_urls",
+            message="Tavily 请求成功，但没有发现可返回的 URL",
+            service="tavily",
+            retryable=False,
+            diagnostics={"upstream_succeeded": True, "empty_result": True},
+        )
+        return WebMapResponse(
+            status="error",
+            base_url=result.base_url or url,
+            results=[],
+            response_time=result.response_time,
+            ignored_results=result.ignored_results,
+            error=detail.message,
+            error_detail=detail,
+        )
+    if result.ignored_results or not result.base_url:
+        detail = make_error_detail(
+            code="tavily_map_incomplete",
+            message="Tavily 返回了部分站点映射结果",
+            service="tavily",
+            retryable=False,
+            diagnostics={
+                "ignored_results": result.ignored_results,
+                "missing_base_url": not bool(result.base_url),
+            },
+        )
+        return WebMapResponse(
+            status="partial_success",
+            partial=True,
+            base_url=result.base_url or url,
+            results=result.results,
+            response_time=result.response_time,
+            ignored_results=result.ignored_results,
+            error_detail=detail,
+        )
+    return WebMapResponse(status="success", **result.model_dump())

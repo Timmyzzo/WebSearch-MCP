@@ -13,7 +13,7 @@
 
 项目优先级依次为：可用性、答案准确性与前沿性、故障可解释性、跨客户端兼容性、性能与维护性。
 
-当前进度：P0、P1、P2、P3 已完成；下一阶段为 P4 统一返回协议。
+当前进度：P0、P1、P2、P3、P4 已完成；下一阶段为 P5 搜索 Prompt 与搜索质量重构。
 
 ## 2. 已确认的产品决策
 
@@ -263,9 +263,18 @@
 
 ### P4：统一返回协议
 
-- [ ] 定义 `success`、`partial_success`、`error` 三种状态。
-- [ ] 所有工具使用结构化返回值和稳定错误码。
-- [ ] 禁止异常被吞掉后伪装成空成功结果。
+- [x] 定义 `success`、`partial_success`、`error` 三种状态。
+- [x] 所有工具使用结构化返回值和稳定错误码。
+- [x] 禁止异常被吞掉后伪装成空成功结果。
+
+P4 的兼容实现约定：
+
+- `status` 是权威状态；规范错误对象位于 `error_detail`。
+- `error_detail` 至少包含 `code`、`message`、`service` 和 `retryable`，存在时还包含 `http_status`、`upstream_code` 和脱敏 `diagnostics`。
+- 旧 `error` 字符串、`partial`、`content`、`results`、`success`、P2 `tavily_error` 和 P3 `grok_error` 暂不删除。
+- Grok 成功、Tavily 补充失败为 `partial_success`；Grok 最终失败始终为 `error`，Tavily 结果不能替代 Grok 答案。
+- Grok 有效答案没有来源仍为 `success`；空答案、空抓取内容和空 URL 映射分别使用稳定错误码，不作为空成功。
+- 结构化错误只终止当前调用；标准 stdio 初始化、工具发现、后续调用和可选 `Context` 保持可用。
 
 ### P5：搜索质量
 
@@ -305,5 +314,7 @@
 - Tavily 正常轮询，多种错误能正确分类并切换 Key。
 - 所有 Tavily Key 不可用时，当前调用快速停止并明确提醒用户。
 - Grok 主模型失败后自动切换备用模型，双模型失败时返回清晰错误。
+- 所有核心与保留规划工具使用统一三态和通用脱敏错误对象，并保留 P2/P3 兼容字段。
+- 空内容、空 URL 和异常失败不会伪装成成功；工具错误后 MCP 进程仍可继续服务。
 - 搜索结果优先最新、权威和原始资料，并能解释证据等级与限制。
 - 自动化测试覆盖关键故障路径。

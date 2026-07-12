@@ -11,6 +11,7 @@ src/grok_search/
 ├─ lifecycle.py           信号处理与 Windows 父进程监控
 ├─ config.py              环境变量、模型配置和 Tavily Key 轮询
 ├─ models.py              公共结构化响应模型
+├─ protocol.py            三态协议、错误对象构造与诊断脱敏
 ├─ prompts.py             Grok 搜索 Prompt
 ├─ sources.py             信源提取、合并与会话缓存
 ├─ clients/
@@ -45,6 +46,9 @@ uv run python -m build
 - Tavily Search、Extract、Map 模拟请求。
 - MCP 工具参数、结构化输出和可选 Context。
 - 标准 MCP stdio 初始化、工具发现和调用。
+- `success`、`partial_success`、`error` 三态及通用错误对象 Schema。
+- Grok/Tavily 组合、合法空结果、旧字段映射、脱敏和并发状态隔离。
+- stdio 同一进程内的成功、部分成功、错误、参数校验错误及错误后存活。
 
 ## 3. MCP 兼容约束
 
@@ -53,11 +57,13 @@ uv run python -m build
 - `Context` 是可选注入能力，不能成为客户端必填参数。
 - 不修改 Cherry Studio、Claude Code 或 Codex 的本地配置。
 - 正常结果与错误结果都返回结构化对象。
+- 所有工具以 `status` 为权威状态，并保留 `error`、`partial`、`tavily_error`、`grok_error` 等兼容字段。
+- 规范错误位于 `error_detail`，必须包含稳定 `code`、用户消息、`service` 和 `retryable`。
 - Windows 父进程监控改动必须通过 stdio 子进程测试。
 
 ## 4. 当前阶段边界
 
-P0、P1、P2 和 P3 已完成。P2 实现包括：
+P0、P1、P2、P3 和 P4 已完成。P2 实现包括：
 
 - 多 Key 正常轮询与共享健康状态。
 - 错误分类和 `Retry-After` 解析。
@@ -79,7 +85,18 @@ P3 在不提前实现 P4 统一协议的前提下增加了：
 - 流式响应完成性校验，以及不会缓存或返回残缺流的结构化最终错误。
 - 主备模型独立尝试计数、随机抖动指数退避和 stdio 错误后存活测试。
 
-P3 没有统一全项目 `success`/`partial_success`/`error` 协议，没有重构搜索 Prompt，也没有执行 P6 的真实客户端人工验收。敏感日志缩减、日志轮转和其他路线图暂缓事项仍未实现。
+P4 在保留 P2/P3 兼容字段和可靠性语义的前提下增加了：
+
+- 全工具统一 `success`、`partial_success`、`error` 三态。
+- 规范 `error_detail`：稳定错误码、用户消息、服务名、可重试性、HTTP/上游错误码和脱敏诊断。
+- `web_search` 的 Grok/Tavily 四种组合语义；Tavily 不能伪装 Grok 答案。
+- 空答案、空抓取内容和空 URL 映射与真实上游失败的独立错误码。
+- `get_sources`、配置、模型切换和保留规划工具的稳定结构化响应。
+- P2 `tavily_error`、P3 `grok_error`、旧 `error`/`partial`/`content`/`results` 字段的兼容映射。
+- API Key、Authorization、可能回显凭据的响应正文、traceback 和内部对象表示的错误输出隔离。
+- 固定 MCP 输出 Schema、可选 `Context`、并发响应隔离，以及错误后 stdio 进程存活测试。
+
+P4 没有重构搜索 Prompt，也没有执行 P6 的真实客户端人工验收。P5、P6、敏感日志整体重构、日志轮转和其他路线图暂缓事项仍未实现。
 
 ## 5. 提交前检查
 

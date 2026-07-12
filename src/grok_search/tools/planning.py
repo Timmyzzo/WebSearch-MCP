@@ -4,14 +4,66 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from ..app import mcp
+from ..models import PlanningResponse
 from ..planning import _split_csv
 from ..planning import engine as planning_engine
+from ..protocol import make_error_detail
 
 
-def _missing_session(session_id: str) -> dict[str, str] | None:
+def _planning_error(code: str, message: str, **diagnostics: object) -> PlanningResponse:
+    detail = make_error_detail(
+        code=code,
+        message=message,
+        service="planning",
+        retryable=False,
+        diagnostics=diagnostics,
+    )
+    return PlanningResponse(
+        status="error",
+        error=message,
+        error_detail=detail,
+    )
+
+
+def _missing_session(session_id: str) -> PlanningResponse | None:
     if planning_engine.get_session(session_id):
         return None
-    return {"error": f"Session '{session_id}' not found. Call plan_intent first."}
+    message = f"Session '{session_id}' not found. Call plan_intent first."
+    response = _planning_error("planning_session_not_found", message, session_id=session_id)
+    response.session_id = session_id
+    return response
+
+
+def _planning_result(result: dict) -> PlanningResponse:
+    if message := result.get("error"):
+        return _planning_error("planning_phase_invalid", str(message))
+    complete = bool(result.get("plan_complete"))
+    detail = None
+    if not complete:
+        detail = make_error_detail(
+            code="planning_incomplete",
+            message="搜索计划尚未完成，可继续提交剩余规划阶段",
+            service="planning",
+            retryable=True,
+            diagnostics={"phases_remaining": result.get("phases_remaining", [])},
+        )
+    return PlanningResponse(
+        status="success" if complete else "partial_success",
+        partial=not complete,
+        error_detail=detail,
+        **result,
+    )
+
+
+def _process_phase(**kwargs: object) -> PlanningResponse:
+    try:
+        return _planning_result(planning_engine.process_phase(**kwargs))
+    except Exception as exc:
+        return _planning_error(
+            "planning_internal_error",
+            "规划组件发生内部错误，当前工具调用已停止",
+            exception_type=type(exc).__name__,
+        )
 
 
 @mcp.tool(name="plan_intent", description="Optionally start or revise a structured search plan.")
@@ -35,7 +87,9 @@ async def plan_intent(
     unverified_terms: Annotated[str, Field(description="Comma-separated terms to verify.")] = "",
     is_revision: Annotated[bool, Field(description="Overwrite the previous intent.")] = False,
     thought: Annotated[str, Field(description="Optional concise planning note.")] = "",
-) -> dict:
+) -> PlanningResponse:
+    if session_id and (missing := _missing_session(session_id)):
+        return missing
     data: dict = {
         "core_question": core_question,
         "query_type": query_type,
@@ -49,7 +103,7 @@ async def plan_intent(
         data["ambiguities"] = _split_csv(ambiguities)
     if unverified_terms:
         data["unverified_terms"] = _split_csv(unverified_terms)
-    return planning_engine.process_phase(
+    return _process_phase(
         phase="intent_analysis",
         thought=thought,
         session_id=session_id,
@@ -69,10 +123,10 @@ async def plan_complexity(
     confidence: Annotated[float, Field(ge=0, le=1)] = 1.0,
     is_revision: bool = False,
     thought: str = "",
-) -> dict:
+) -> PlanningResponse:
     if missing := _missing_session(session_id):
         return missing
-    return planning_engine.process_phase(
+    return _process_phase(
         phase="complexity_assessment",
         thought=thought,
         session_id=session_id,
@@ -99,7 +153,7 @@ async def plan_sub_query(
     tool_hint: Literal["web_search", "web_fetch", "web_map", ""] = "",
     is_revision: bool = False,
     thought: str = "",
-) -> dict:
+) -> PlanningResponse:
     if missing := _missing_session(session_id):
         return missing
     item: dict = {"id": id, "goal": goal, "expected_output": expected_output, "boundary": boundary}
@@ -107,7 +161,7 @@ async def plan_sub_query(
         item["depends_on"] = _split_csv(depends_on)
     if tool_hint:
         item["tool_hint"] = tool_hint
-    return planning_engine.process_phase(
+    return _process_phase(
         phase="query_decomposition",
         thought=thought,
         session_id=session_id,
@@ -128,7 +182,7 @@ async def plan_search_term(
     fallback_plan: str = "",
     is_revision: bool = False,
     thought: str = "",
-) -> dict:
+) -> PlanningResponse:
     if missing := _missing_session(session_id):
         return missing
     data: dict = {"search_terms": [{"term": term, "purpose": purpose, "round": round}]}
@@ -136,7 +190,7 @@ async def plan_search_term(
         data["approach"] = approach
     if fallback_plan:
         data["fallback_plan"] = fallback_plan
-    return planning_engine.process_phase(
+    return _process_phase(
         phase="search_strategy",
         thought=thought,
         session_id=session_id,
@@ -156,7 +210,7 @@ async def plan_tool_mapping(
     params_json: str = "",
     is_revision: bool = False,
     thought: str = "",
-) -> dict:
+) -> PlanningResponse:
     if missing := _missing_session(session_id):
         return missing
     item: dict = {"sub_query_id": sub_query_id, "tool": tool, "reason": reason}
@@ -164,8 +218,11 @@ async def plan_tool_mapping(
         try:
             item["params"] = json.loads(params_json)
         except json.JSONDecodeError:
-            item["params"] = {}
-    return planning_engine.process_phase(
+            return _planning_error(
+                "planning_invalid_params_json",
+                "params_json 必须是有效 JSON，当前规划阶段未保存",
+            )
+    return _process_phase(
         phase="tool_selection",
         thought=thought,
         session_id=session_id,
@@ -184,11 +241,11 @@ async def plan_execution(
     confidence: Annotated[float, Field(ge=0, le=1)] = 1.0,
     is_revision: bool = False,
     thought: str = "",
-) -> dict:
+) -> PlanningResponse:
     if missing := _missing_session(session_id):
         return missing
     parallel = [_split_csv(group) for group in parallel_groups.split(";") if group.strip()]
-    return planning_engine.process_phase(
+    return _process_phase(
         phase="execution_order",
         thought=thought,
         session_id=session_id,

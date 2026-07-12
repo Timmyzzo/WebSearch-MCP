@@ -146,3 +146,96 @@ async def test_stdio_grok_failover_error_is_structured_and_server_stays_alive():
     assert structured["grok_error"]["total_attempts"] == 2
     assert "grok-secret-key" not in str(structured)
     assert {tool.name for tool in tools_after_error.tools}.issuperset({"web_search", "web_fetch"})
+
+
+async def test_stdio_unified_success_partial_error_validation_and_survival():
+    class GrokSuccessHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = (
+                b'data: {"choices":[{"delta":{"content":"Answer"},'
+                b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    class TavilyUnavailableHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = b'{"error":{"code":"upstream_unavailable","message":"temporary"}}'
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    grok_upstream = ThreadingHTTPServer(("127.0.0.1", 0), GrokSuccessHandler)
+    tavily_upstream = ThreadingHTTPServer(("127.0.0.1", 0), TavilyUnavailableHandler)
+    grok_thread = threading.Thread(target=grok_upstream.serve_forever, daemon=True)
+    tavily_thread = threading.Thread(target=tavily_upstream.serve_forever, daemon=True)
+    grok_thread.start()
+    tavily_thread.start()
+
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src")
+    env["GROK_API_URL"] = f"http://127.0.0.1:{grok_upstream.server_port}"
+    env["GROK_API_KEY"] = "grok-secret-key"
+    env["GROK_PRIMARY_MODEL"] = "primary"
+    env["GROK_FALLBACK_MODEL"] = "fallback"
+    env["GROK_MODEL_MAX_ATTEMPTS"] = "1"
+    env["TAVILY_API_URL"] = f"http://127.0.0.1:{tavily_upstream.server_port}"
+    env["TAVILY_API_KEYS"] = "tvly-secret-key-0001,tvly-secret-key-0002"
+    env["TAVILY_SERVICE_FAILURE_THRESHOLD"] = "2"
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "grok_search.server"],
+        cwd=root,
+        env=env,
+        encoding="utf-8",
+        encoding_error_handler="replace",
+    )
+
+    try:
+        async with stdio_client(server) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                success = await session.call_tool("web_search", {"query": "success"})
+                partial = await session.call_tool(
+                    "web_search", {"query": "partial", "extra_sources": 1}
+                )
+                error = await session.call_tool(
+                    "get_sources", {"session_id": "missing-session"}
+                )
+                validation_error = await session.call_tool("web_map", {"url": "not-a-url"})
+                tools_after_errors = await session.list_tools()
+    finally:
+        grok_upstream.shutdown()
+        grok_upstream.server_close()
+        tavily_upstream.shutdown()
+        tavily_upstream.server_close()
+        grok_thread.join(timeout=2)
+        tavily_thread.join(timeout=2)
+
+    assert success.isError is False
+    assert success.structuredContent["status"] == "success"
+    assert success.structuredContent["content"] == "Answer"
+    assert partial.isError is False
+    assert partial.structuredContent["status"] == "partial_success"
+    assert partial.structuredContent["error_detail"]["service"] == "tavily"
+    assert error.isError is False
+    assert error.structuredContent["status"] == "error"
+    assert error.structuredContent["error_detail"]["code"] == (
+        "session_id_not_found_or_expired"
+    )
+    assert validation_error.isError is True
+    assert {tool.name for tool in tools_after_errors.tools}.issuperset(
+        {"web_search", "get_sources", "web_fetch", "web_map"}
+    )

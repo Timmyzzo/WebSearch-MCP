@@ -168,11 +168,14 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 
 建议按顺序执行：
 
-1. 调用 `get_config_info`，确认 Key 已脱敏且 Grok `/models` 可访问。
-2. 调用 `web_search` 搜索一个近期主题。
-3. 使用返回的 `session_id` 调用 `get_sources`。
-4. 调用 `web_fetch` 提取一个公开网页。
-5. 调用 `web_map` 映射一个小型文档站点，先保持 `max_depth=1`。
+1. 调用 `get_config_info`，确认 Key 已脱敏；连接正常时 `status` 为 `success`，仅连接测试失败时为 `partial_success` 并提供 `error_detail`。
+2. 调用 `web_search` 搜索一个近期主题，确认完整结果为 `status="success"`。
+3. 使用返回的 `session_id` 调用 `get_sources`；有效会话即使没有来源也应返回 `success` 和空 `sources`。
+4. 调用 `web_fetch` 提取一个公开网页。上游成功但确实没有正文时返回 `error`/`tavily_no_content`，不同于配置或服务故障。
+5. 调用 `web_map` 映射一个小型文档站点，先保持 `max_depth=1`。没有 URL 时返回 `error`/`tavily_no_urls`。
+6. 制造一次可恢复错误后再次列出或调用工具，确认 MCP 进程仍然存活。
+
+所有工具的规范错误对象都位于 `error_detail`，至少包含 `code`、`message`、`service` 和 `retryable`；存在时还包含 `http_status`、`upstream_code` 与脱敏 `diagnostics`。旧字段 `error`、`partial`、`tavily_error`、`grok_error` 仍保留兼容。
 
 ## 7. 常见故障
 
@@ -182,8 +185,9 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 | 启动超时 | 首次安装可能需要下载依赖；提高 `startup_timeout_sec`。 |
 | JSON 配置报错 | 检查尾逗号、引号和 PowerShell 转义；优先使用 here-string。 |
 | Grok 连接失败 | 检查 `GROK_API_URL` 是否包含正确的 API 根路径及 `/models` 支持。 |
-| Grok 返回主备模型失败 | 查看结构化 `grok_error` 的尝试次数和最后错误分类；认证/参数错误不会切换模型。 |
+| Grok 返回主备模型失败 | 先查看 `error_detail`，再查看兼容的 `grok_error` 尝试次数和最后错误分类；认证/参数错误不会切换模型。 |
 | 抓取或映射报配置错误 | 配置 Tavily Key，并确认 `TAVILY_ENABLED` 未设为 `false`。 |
+| 客户端显示部分成功 | 检查 `status="partial_success"`、`error_detail` 和组件兼容字段；可用结果仍可使用。 |
 | 证书验证失败 | 为 `uvx` 增加 `--native-tls`，或检查企业代理证书。 |
 
 不要把真实 API Key 提交到仓库或粘贴到公开 Issue。

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from ..models import TavilyMapResult, TavilySearchResult
+from ..protocol import sanitize_diagnostic_text
 from ..tavily_reliability import (
     TavilyReliabilityManager,
     TavilyServiceState,
@@ -27,15 +28,31 @@ class TavilyClientError(RuntimeError):
         code: str = "tavily_error",
         key_statuses: list[dict[str, object]] | None = None,
         service: dict[str, object] | None = None,
+        retryable: bool = False,
+        http_status: int | None = None,
+        upstream_code: str | None = None,
+        diagnostics: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.key_statuses = key_statuses or []
         self.service = service or {}
+        self.retryable = retryable
+        self.http_status = http_status
+        self.upstream_code = upstream_code
+        self.diagnostics = diagnostics or {}
 
     def to_dict(self) -> dict[str, object]:
-        result: dict[str, object] = {"code": self.code, "message": self.message}
+        result: dict[str, object] = {
+            "code": self.code,
+            "message": self.message,
+            "component": "tavily",
+            "retryable": self.retryable,
+            "http_status": self.http_status,
+            "upstream_code": self.upstream_code,
+            "diagnostics": self.diagnostics,
+        }
         if self.key_statuses:
             result["key_statuses"] = self.key_statuses
         if self.service:
@@ -123,6 +140,8 @@ class TavilyClient:
 
         attempted: set[str] = set()
         consistent_errors: list[tuple[str, str]] = []
+        last_http_status: int | None = None
+        last_upstream_code: str | None = None
         while len(attempted) < len(self.reliability.raw_keys):
             api_key = await self.reliability.acquire_key(attempted)
             if api_key is None:
@@ -159,14 +178,18 @@ class TavilyClient:
 
             data = self._json_or_none(response)
             error_code, raw_message = response_error_text(data, response.text)
-            reason = self._safe_reason(raw_message or f"HTTP {response.status_code}")
             retry_after = parse_retry_after(response.headers.get("Retry-After"))
             status = response.status_code
+            last_http_status = status
+            last_upstream_code = self._safe_upstream_code(error_code)
+            reason = last_upstream_code or f"HTTP {status}"
 
             if status == 404:
                 raise self._error(
                     "tavily_api_configuration_error",
                     "Tavily API 地址或版本配置错误，请检查 TAVILY_API_URL",
+                    http_status=status,
+                    upstream_code=last_upstream_code,
                 )
             if status in {401, 403} or is_explicitly_invalid(error_code, raw_message):
                 await self.reliability.mark_invalid(api_key, reason)
@@ -175,6 +198,8 @@ class TavilyClient:
                 raise self._error(
                     "tavily_request_invalid",
                     f"Tavily 请求参数错误（HTTP {status}）: {reason}",
+                    http_status=status,
+                    upstream_code=last_upstream_code,
                 )
             if status == 429:
                 await self.reliability.mark_rate_limited(
@@ -210,6 +235,8 @@ class TavilyClient:
                 "tavily_service_unavailable",
                 "Tavily 服务暂时不可用，服务级熔断器已打开，请稍后重试",
                 service=service,
+                http_status=last_http_status,
+                upstream_code=last_upstream_code,
             )
         if (
             len(attempted) == len(self.reliability.raw_keys)
@@ -219,16 +246,23 @@ class TavilyClient:
             raise self._error(
                 "tavily_api_configuration_error",
                 "所有 Tavily Key 对当前端点返回一致错误；请检查 TAVILY_API_URL 和 API 版本",
+                http_status=last_http_status,
+                upstream_code=last_upstream_code,
             )
         if consistent_errors:
             raise self._error(
                 "tavily_upstream_error",
                 f"Tavily API 返回错误: {consistent_errors[-1][1]}",
+                retryable=False,
+                http_status=last_http_status,
+                upstream_code=last_upstream_code,
             )
         raise await self._reliability_error(
             "tavily_all_keys_unavailable",
             "所有 Tavily Key 均不可用；请补充有效 Key 或重新生成 Tavily Key",
             service=service,
+            http_status=last_http_status,
+            upstream_code=last_upstream_code,
         )
 
     async def _request_legacy(
@@ -255,30 +289,58 @@ class TavilyClient:
             raise TavilyClientError(
                 f"Tavily 临时网络错误: {type(exc).__name__}",
                 code="tavily_service_unavailable",
+                retryable=True,
             ) from exc
         if response.status_code in {400, 422}:
             raise TavilyClientError(
                 f"Tavily 请求参数错误（HTTP {response.status_code}）",
                 code="tavily_request_invalid",
+                http_status=response.status_code,
             )
         if response.status_code == 404:
             raise TavilyClientError(
                 "Tavily API 地址或版本配置错误，请检查 TAVILY_API_URL",
                 code="tavily_api_configuration_error",
+                http_status=response.status_code,
             )
         if not response.is_success:
             raise TavilyClientError(
                 f"Tavily API 返回 HTTP {response.status_code}",
                 code="tavily_upstream_error",
+                retryable=response.status_code in {408, 429}
+                or 500 <= response.status_code < 600,
+                http_status=response.status_code,
             )
         return self._json_object(response)
 
     def _safe_reason(self, reason: str) -> str:
         keys = self.reliability.raw_keys if self.reliability else ()
-        return redact_keys(reason, keys)[:300]
+        return sanitize_diagnostic_text(redact_keys(reason, keys), secrets=tuple(keys), limit=200)
 
-    def _error(self, code: str, message: str) -> TavilyClientError:
-        return TavilyClientError(message, code=code)
+    def _safe_upstream_code(self, code: str | None) -> str | None:
+        if not code:
+            return None
+        keys = self.reliability.raw_keys if self.reliability else ()
+        value = sanitize_diagnostic_text(redact_keys(code, keys), secrets=tuple(keys), limit=80)
+        value = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in value)
+        return value or None
+
+    def _error(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        http_status: int | None = None,
+        upstream_code: str | None = None,
+    ) -> TavilyClientError:
+        return TavilyClientError(
+            message,
+            code=code,
+            retryable=retryable,
+            http_status=http_status,
+            upstream_code=upstream_code,
+        )
 
     async def _reliability_error(
         self,
@@ -286,13 +348,22 @@ class TavilyClient:
         message: str,
         *,
         service: dict[str, object],
+        http_status: int | None = None,
+        upstream_code: str | None = None,
     ) -> TavilyClientError:
         statuses = await self.reliability.status_summary() if self.reliability else []
+        retryable = service.get("state") in {"open", "half_open"} or any(
+            item.get("state") in {"healthy", "cooldown", "quota_exhausted"}
+            for item in statuses
+        )
         return TavilyClientError(
             message,
             code=code,
             key_statuses=statuses,
             service=service,
+            retryable=retryable,
+            http_status=http_status,
+            upstream_code=upstream_code,
         )
 
     @staticmethod
@@ -309,6 +380,8 @@ class TavilyClient:
             raise TavilyClientError(
                 "Tavily API 返回了无效 JSON 响应",
                 code="tavily_invalid_response",
+                retryable=True,
+                http_status=response.status_code,
             )
         return data
 
@@ -366,8 +439,15 @@ class TavilyClient:
         if instructions:
             body["instructions"] = instructions
         data = await self._request("/map", body, timeout=float(timeout + 10))
+        raw_results = data.get("results", [])
+        if not isinstance(raw_results, list):
+            raw_results = []
+        results = [item.strip() for item in raw_results if isinstance(item, str) and item.strip()]
         return TavilyMapResult(
-            base_url=data.get("base_url", ""),
-            results=data.get("results", []),
+            base_url=(
+                data.get("base_url", "") if isinstance(data.get("base_url", ""), str) else ""
+            ),
+            results=results,
             response_time=data.get("response_time", 0),
+            ignored_results=len(raw_results) - len(results),
         )
