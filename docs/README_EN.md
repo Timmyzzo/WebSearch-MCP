@@ -6,68 +6,49 @@ English | [简体中文](../README.md)
 
 A standard MCP web-search server for Cherry Studio, Claude Code, and Codex
 
+[![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP stdio](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
 
 </div>
 
-## Overview
+## What is WebSearch MCP?
 
-WebSearch MCP uses Grok for AI-driven web search and Tavily for structured search results, page extraction, and site mapping. It runs over the standard MCP stdio transport and does not depend on private configuration from any single client.
+WebSearch MCP combines Grok's AI-powered web search with Tavily search, page extraction, and site mapping behind a standard MCP stdio server. It does not depend on private client capabilities and never edits local Cherry Studio, Claude Code, or Codex configuration.
 
 ```text
 MCP Client --stdio--> WebSearch MCP
                        |-- web_search --> Grok + optional Tavily sources
+                       |-- get_sources --> cached search sources
                        |-- web_fetch  --> Tavily Extract
                        `-- web_map    --> Tavily Map
 ```
 
-Highlights:
+Typical uses include retrieving current official documentation, producing answers with traceable sources, extracting pages as Markdown, and reusing the same web tools across MCP clients.
 
-- Grok search through an OpenAI-compatible API, including per-request model selection.
-- Tavily Search, Extract, and Map.
-- Multiple Tavily keys separated by commas, semicolons, or newlines, with round-robin selection.
-- Cached search sources retrievable through `get_sources`.
-- Simple JSON Schemas and structured tool results.
-- Windows parent-process monitoring for long-running stdio clients.
+## Project status
 
-## Installation
+- P0 repository and test baseline: complete.
+- P1 legacy crawler removal and modularization: complete.
+- Next: P2 Tavily error classification plus key-level and service-level circuit breakers.
 
-Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/installation/) are required. Every example installs from:
+See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
 
-```text
-https://github.com/Timmyzzo/WebSearch-MCP
-```
+## Quick start
 
-### Cherry Studio
+### 1. Requirements
 
-Add this server in Cherry Studio's MCP settings:
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- An OpenAI-compatible Grok API URL and key
+- An optional Tavily key for `web_fetch`, `web_map`, and supplemental sources
 
-```json
-{
-  "mcpServers": {
-    "grok-search": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/Timmyzzo/WebSearch-MCP",
-        "grok-search"
-      ],
-      "env": {
-        "GROK_API_URL": "https://your-api-endpoint.example/v1",
-        "GROK_API_KEY": "your-grok-api-key",
-        "TAVILY_API_KEY": "tvly-your-tavily-key"
-      }
-    }
-  }
-}
-```
+### 2. Add the MCP server
 
-### Claude Code
+Claude Code example for Linux/macOS:
 
 ```bash
-claude mcp remove grok-search
 claude mcp add-json grok-search --scope user '{
   "type": "stdio",
   "command": "uvx",
@@ -84,30 +65,24 @@ claude mcp add-json grok-search --scope user '{
 }'
 ```
 
-Add `"--native-tls"` at the beginning of `args` when the host must use its system certificate store.
+For Cherry Studio, Claude Code on PowerShell, Codex, validation steps, and troubleshooting, see the [client setup guide](./CLIENT_SETUP_EN.md).
 
-### Codex
+### 3. Verify
 
-Add the following to `~/.codex/config.toml`:
+The client should discover these core tools:
 
-```toml
-[mcp_servers.grok-search]
-command = "uvx"
-args = [
-  "--from",
-  "git+https://github.com/Timmyzzo/WebSearch-MCP",
-  "grok-search",
-]
-startup_timeout_sec = 30
-tool_timeout_sec = 180
-
-[mcp_servers.grok-search.env]
-GROK_API_URL = "https://your-api-endpoint.example/v1"
-GROK_API_KEY = "your-grok-api-key"
-TAVILY_API_KEY = "tvly-your-tavily-key"
+```text
+web_search
+get_sources
+web_fetch
+web_map
+get_config_info
+switch_model
 ```
 
-## Environment variables
+Call `get_config_info` first to inspect masked configuration and test the Grok `/models` endpoint.
+
+## Configuration
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
@@ -115,32 +90,47 @@ TAVILY_API_KEY = "tvly-your-tavily-key"
 | `GROK_API_KEY` | Yes | - | Grok API key. |
 | `GROK_MODEL` | No | `grok-4-fast` | Default Grok model. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
-| `TAVILY_API_KEYS` | No | - | Multiple keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
+| `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
 | `TAVILY_API_URL` | No | `https://api.tavily.com` | Tavily API root. |
 | `TAVILY_ENABLED` | No | `true` | Enables or disables Tavily. |
 | `GROK_DEBUG` | No | `false` | Enables debug logging. |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level. |
 | `GROK_LOG_DIR` | No | `logs` | Log directory. |
-| `GROK_RETRY_MAX_ATTEMPTS` | No | `3` | Grok retry configuration. |
+| `GROK_RETRY_MAX_ATTEMPTS` | No | `3` | Grok retry setting. |
 | `GROK_RETRY_MULTIPLIER` | No | `1` | Exponential backoff multiplier. |
 | `GROK_RETRY_MAX_WAIT` | No | `10` | Maximum backoff in seconds. |
 
-With Grok alone, `web_search` remains available. `web_fetch`, `web_map`, and extra Tavily sources require a Tavily key.
+With Grok alone, `web_search` remains available. Setting `TAVILY_ENABLED=false` disables Tavily even when keys are present.
 
-## MCP tools
+## Tool overview
 
-Core tools:
+| Tool | Purpose | Main response fields |
+| --- | --- | --- |
+| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `error` |
+| `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count`, `error` |
+| `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `error` |
+| `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `error` |
+| `get_config_info` | Return masked configuration and test Grok | `configuration`, `connection_test` |
+| `switch_model` | Persist the default Grok model | `success`, `previous_model`, `current_model` |
 
-- `web_search(query, platform="", model="", extra_sources=0)` returns a session ID, answer content, and source count.
-- `get_sources(session_id)` retrieves all cached sources for a search.
-- `web_fetch(url)` extracts Markdown through Tavily Extract.
-- `web_map(url, instructions="", max_depth=1, max_breadth=20, limit=50, timeout=150)` discovers site URLs.
-- `get_config_info()` returns masked configuration and tests Grok connectivity.
-- `switch_model(model)` persists the default Grok model.
+`query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
 
-Optional phased planning tools are also available. Planning is not required before `web_search`, and every `thought` parameter is optional.
+## Multiple Tavily keys
 
-The server never edits local Claude Code, Codex, or Cherry Studio configuration. Configure built-in client web tools in the client itself when needed.
+Configure keys with commas, semicolons, or newlines:
+
+```text
+TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
+```
+
+The current release selects keys in round-robin order. Health states, error classification, and circuit breaking are part of P2; current round-robin behavior is not a complete failover system.
+
+## Troubleshooting
+
+- If tools are missing, ensure `uvx` is available to the client process and validate the JSON/TOML configuration.
+- If search works but fetch or map fails, configure Tavily and confirm that it is enabled.
+- For corporate certificate errors, add `--native-tls` before `--from` in the `uvx` arguments.
+- Configuration diagnostics mask API keys. Never commit real keys or paste them into issues and screenshots.
 
 ## Development
 
@@ -150,13 +140,10 @@ cd WebSearch-MCP
 uv sync --extra dev
 uv run ruff check .
 uv run pytest
+uv run python -m build
 ```
 
-Start the stdio server directly with:
-
-```bash
-uv run grok-search
-```
+See the [developer guide](./DEVELOPMENT.md) for module ownership, tests, and phase boundaries.
 
 ## License
 
