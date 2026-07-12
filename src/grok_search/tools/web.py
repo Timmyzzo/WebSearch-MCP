@@ -11,6 +11,7 @@ from ..logger import log_info
 from ..models import (
     Source,
     SourcesResponse,
+    TavilyErrorDetail,
     TavilySearchResult,
     WebFetchResponse,
     WebMapResponse,
@@ -21,6 +22,7 @@ from ..sources import SourcesCache, merge_sources, new_session_id, split_answer_
 _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
+_TAVILY_CLIENT: TavilyClient | None = None
 
 
 def _new_grok_client(api_url: str, api_key: str, model: str) -> GrokClient:
@@ -28,7 +30,29 @@ def _new_grok_client(api_url: str, api_key: str, model: str) -> GrokClient:
 
 
 def _new_tavily_client() -> TavilyClient:
-    return TavilyClient(config.tavily_api_url, config.next_tavily_api_key)
+    global _TAVILY_CLIENT
+    if _TAVILY_CLIENT is None:
+        _TAVILY_CLIENT = TavilyClient(
+            config.tavily_api_url,
+            config.tavily_api_keys,
+            key_cooldown=config.tavily_key_cooldown,
+            quota_cooldown=config.tavily_quota_cooldown,
+            service_failure_threshold=config.tavily_service_failure_threshold,
+            service_cooldown=config.tavily_service_cooldown,
+        )
+    return _TAVILY_CLIENT
+
+
+async def close_tavily_client() -> None:
+    global _TAVILY_CLIENT
+    client = _TAVILY_CLIENT
+    _TAVILY_CLIENT = None
+    if client is not None:
+        await client.aclose()
+
+
+def _tavily_error_detail(exc: TavilyClientError) -> TavilyErrorDetail:
+    return TavilyErrorDetail.model_validate(exc.to_dict())
 
 
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
@@ -123,15 +147,16 @@ async def web_search(
         except Exception:
             return ""
 
-    async def safe_tavily() -> list[TavilySearchResult]:
+    async def safe_tavily() -> tuple[list[TavilySearchResult], TavilyClientError | None]:
         if not tavily_count:
-            return []
+            return [], None
         try:
-            return await _new_tavily_client().search(query, tavily_count)
-        except Exception:
-            return []
+            return await _new_tavily_client().search(query, tavily_count), None
+        except TavilyClientError as exc:
+            return [], exc
 
-    grok_result, tavily_results = await asyncio.gather(safe_grok(), safe_tavily())
+    grok_result, tavily_outcome = await asyncio.gather(safe_grok(), safe_tavily())
+    tavily_results, tavily_error = tavily_outcome
     answer, grok_sources = split_answer_and_sources(grok_result or "")
     all_sources = merge_sources(grok_sources, _extra_results_to_sources(tavily_results))
     await _SOURCES_CACHE.set(session_id, all_sources)
@@ -140,6 +165,13 @@ async def web_search(
         session_id=session_id,
         content=answer,
         sources_count=len(all_sources),
+        partial=tavily_error is not None and bool(answer or grok_sources),
+        error=(
+            tavily_error.code
+            if tavily_error is not None and not (answer or grok_sources)
+            else None
+        ),
+        tavily_error=_tavily_error_detail(tavily_error) if tavily_error else None,
     )
 
 
@@ -186,7 +218,11 @@ async def web_fetch(
         content = await _new_tavily_client().extract(url)
     except TavilyClientError as exc:
         await log_info(ctx, "Fetch Failed!", config.debug_enabled)
-        return WebFetchResponse(url=url, error=str(exc))
+        return WebFetchResponse(
+            url=url,
+            error=exc.message,
+            tavily_error=_tavily_error_detail(exc),
+        )
 
     if content:
         await log_info(ctx, "Fetch Finished (Tavily)!", config.debug_enabled)
@@ -231,5 +267,5 @@ async def web_map(
             timeout=timeout,
         )
     except TavilyClientError as exc:
-        return WebMapResponse(error=str(exc))
+        return WebMapResponse(error=exc.message, tavily_error=_tavily_error_detail(exc))
     return WebMapResponse(**result.model_dump())

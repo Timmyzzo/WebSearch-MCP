@@ -10,11 +10,20 @@ class Source(BaseModel):
     provider: str | None = None
 
 
+class TavilyErrorDetail(BaseModel):
+    code: str
+    message: str
+    key_statuses: list[dict[str, Any]] = Field(default_factory=list)
+    service: dict[str, Any] = Field(default_factory=dict)
+
+
 class WebSearchResponse(BaseModel):
     session_id: str
     content: str
     sources_count: int = Field(ge=0)
     error: str | None = None
+    partial: bool = False
+    tavily_error: TavilyErrorDetail | None = None
 
 
 class SourcesResponse(BaseModel):
@@ -29,6 +38,7 @@ class WebFetchResponse(BaseModel):
     content: str = ""
     provider: Literal["tavily"] | None = None
     error: str | None = None
+    tavily_error: TavilyErrorDetail | None = None
 
 
 class TavilySearchResult(BaseModel):
@@ -46,6 +56,7 @@ class TavilyMapResult(BaseModel):
 
 class WebMapResponse(TavilyMapResult):
     error: str | None = None
+    tavily_error: TavilyErrorDetail | None = None
 
 
 class ConnectionTest(BaseModel):
