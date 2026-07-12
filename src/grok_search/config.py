@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from threading import Lock
 
+from .tavily_reliability import key_fingerprint
+
 
 class Config:
     _instance = None
@@ -114,6 +116,22 @@ class Config:
         keys = self.tavily_api_keys
         return keys[0] if keys else None
 
+    @property
+    def tavily_key_cooldown(self) -> float:
+        return max(0.0, float(os.getenv("TAVILY_KEY_COOLDOWN", "30")))
+
+    @property
+    def tavily_quota_cooldown(self) -> float:
+        return max(0.0, float(os.getenv("TAVILY_QUOTA_COOLDOWN", "3600")))
+
+    @property
+    def tavily_service_failure_threshold(self) -> int:
+        return max(2, int(os.getenv("TAVILY_SERVICE_FAILURE_THRESHOLD", "2")))
+
+    @property
+    def tavily_service_cooldown(self) -> float:
+        return max(0.0, float(os.getenv("TAVILY_SERVICE_COOLDOWN", "30")))
+
     def next_tavily_api_key(self) -> str | None:
         keys = self.tavily_api_keys
         if not keys:
@@ -181,9 +199,7 @@ class Config:
     @staticmethod
     def _mask_api_key(key: str) -> str:
         """脱敏显示 API Key，只显示前后各 4 个字符"""
-        if not key or len(key) <= 8:
-            return "***"
-        return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+        return key_fingerprint(key)
 
     def _mask_api_keys(self, keys: list[str]) -> str:
         if not keys:
@@ -215,6 +231,10 @@ class Config:
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
             "TAVILY_API_KEY": self._mask_api_keys(self.tavily_api_keys),
+            "TAVILY_KEY_COOLDOWN": self.tavily_key_cooldown,
+            "TAVILY_QUOTA_COOLDOWN": self.tavily_quota_cooldown,
+            "TAVILY_SERVICE_FAILURE_THRESHOLD": self.tavily_service_failure_threshold,
+            "TAVILY_SERVICE_COOLDOWN": self.tavily_service_cooldown,
             "config_status": config_status,
         }
 

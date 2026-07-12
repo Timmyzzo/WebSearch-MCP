@@ -31,7 +31,8 @@ Typical uses include retrieving current official documentation, producing answer
 
 - P0 repository and test baseline: complete.
 - P1 legacy crawler removal and modularization: complete.
-- Next: P2 Tavily error classification plus key-level and service-level circuit breakers.
+- P2 Tavily multi-key reliability: complete.
+- Next: P3 Grok primary/fallback models and retries.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
 
@@ -93,6 +94,10 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
 | `TAVILY_API_URL` | No | `https://api.tavily.com` | Tavily API root. |
 | `TAVILY_ENABLED` | No | `true` | Enables or disables Tavily. |
+| `TAVILY_KEY_COOLDOWN` | No | `30` | Cooldown in seconds for temporary per-key failures or rate limits. |
+| `TAVILY_QUOTA_COOLDOWN` | No | `3600` | Default cooldown in seconds for exhausted quotas. |
+| `TAVILY_SERVICE_FAILURE_THRESHOLD` | No | `2` | Distinct keys with the same failure required to open the service circuit; minimum 2. |
+| `TAVILY_SERVICE_COOLDOWN` | No | `30` | Tavily service circuit cooldown in seconds. |
 | `GROK_DEBUG` | No | `false` | Enables debug logging. |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level. |
 | `GROK_LOG_DIR` | No | `logs` | Log directory. |
@@ -123,7 +128,16 @@ Configure keys with commas, semicolons, or newlines:
 TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
 ```
 
-The current release selects keys in round-robin order. Health states, error classification, and circuit breaking are part of P2; current round-robin behavior is not a complete failover system.
+Healthy keys are selected fairly in round-robin order, and Search, Extract, and Map share the same runtime health state:
+
+- `healthy`: participates in normal rotation.
+- `cooldown`: temporary rate limit, timeout, network error, or transient service failure.
+- `quota_exhausted`: unavailable for a longer quota cooldown.
+- `invalid`: revoked or unauthorized and disabled for the process lifetime.
+
+HTTP 401/403 disables the current key. HTTP 429 is classified using Tavily error data, response text, and `Retry-After`. HTTP 400/422 returns immediately without consuming every key, while HTTP 404 reports an API URL/version configuration problem. Matching 5xx or network failures from distinct keys open a service-level circuit breaker; after cooldown, only one half-open probe is allowed.
+
+When every key is unavailable, `web_fetch` and `web_map` return `tavily_all_keys_unavailable` with masked key states. `web_search` preserves any Grok answer but sets `partial=true` and includes `tavily_error`. Only the current tool call fails; the MCP process remains alive.
 
 ## Troubleshooting
 

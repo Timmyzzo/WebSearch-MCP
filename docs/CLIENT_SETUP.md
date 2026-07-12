@@ -29,6 +29,8 @@ TAVILY_API_KEY=tvly-your-tavily-key
 
 多个 Tavily Key 使用 `TAVILY_API_KEYS`，例如 `key-1,key-2,key-3`。
 
+可选可靠性参数：`TAVILY_KEY_COOLDOWN=30`、`TAVILY_QUOTA_COOLDOWN=3600`、`TAVILY_SERVICE_FAILURE_THRESHOLD=2`、`TAVILY_SERVICE_COOLDOWN=30`。通常保持默认值即可。
+
 ## 2. Cherry Studio
 
 在 MCP 服务器设置中新增一个 stdio 服务：

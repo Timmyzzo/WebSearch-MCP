@@ -38,3 +38,20 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert info["GROK_API_KEY"] != "1234567890abcdef"
     assert set(info).issuperset({"GROK_API_URL", "GROK_API_KEY", "TAVILY_API_URL"})
     assert all("fire" not in key.lower() for key in info)
+
+
+def test_tavily_reliability_configuration_is_reported_without_raw_keys(monkeypatch):
+    raw_key = "tvly-test-1234"
+    monkeypatch.setenv("TAVILY_API_KEYS", raw_key)
+    monkeypatch.setenv("TAVILY_KEY_COOLDOWN", "12.5")
+    monkeypatch.setenv("TAVILY_QUOTA_COOLDOWN", "7200")
+    monkeypatch.setenv("TAVILY_SERVICE_FAILURE_THRESHOLD", "3")
+    monkeypatch.setenv("TAVILY_SERVICE_COOLDOWN", "45")
+
+    info = config.get_config_info()
+
+    assert info["TAVILY_KEY_COOLDOWN"] == 12.5
+    assert info["TAVILY_QUOTA_COOLDOWN"] == 7200
+    assert info["TAVILY_SERVICE_FAILURE_THRESHOLD"] == 3
+    assert info["TAVILY_SERVICE_COOLDOWN"] == 45
+    assert raw_key not in str(info)

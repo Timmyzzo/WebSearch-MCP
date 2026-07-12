@@ -57,7 +57,7 @@ uv run python -m build
 
 ## 4. 当前阶段边界
 
-P0 和 P1 已完成。下一阶段 P2 只处理 Tavily 可靠性：
+P0、P1 和 P2 已完成。P2 实现包括：
 
 - 多 Key 正常轮询与共享健康状态。
 - 错误分类和 `Retry-After` 解析。
@@ -66,7 +66,11 @@ P0 和 P1 已完成。下一阶段 P2 只处理 Tavily 可靠性：
 - 连接池复用。
 - 所有 Key 不可用时的稳定错误。
 
-P2 不实现 Grok 主备模型，不统一全项目 `success`/`partial_success`/`error` 协议，也不调整暂缓的敏感日志和日志轮转策略。这些分别属于后续阶段。
+运行时由进程级共享 `TavilyClient` 持有，三个端点复用同一个 `httpx.AsyncClient`、Key 健康状态和服务熔断器。FastMCP lifespan 在正常关闭时调用 `aclose()` 释放连接池。
+
+可靠性配置为 `TAVILY_KEY_COOLDOWN`、`TAVILY_QUOTA_COOLDOWN`、`TAVILY_SERVICE_FAILURE_THRESHOLD` 和 `TAVILY_SERVICE_COOLDOWN`。
+
+P2 没有实现 Grok 主备模型，没有统一全项目 `success`/`partial_success`/`error` 协议，也没有调整暂缓的敏感日志和日志轮转策略。这些仍属于后续阶段。
 
 ## 5. 提交前检查
 

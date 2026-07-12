@@ -23,6 +23,8 @@ GROK_API_KEY=your-grok-api-key
 
 Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
 
+Optional reliability settings are `TAVILY_KEY_COOLDOWN=30`, `TAVILY_QUOTA_COOLDOWN=3600`, `TAVILY_SERVICE_FAILURE_THRESHOLD=2`, and `TAVILY_SERVICE_COOLDOWN=30`. The defaults are appropriate for most setups.
+
 ## 2. Cherry Studio
 
 Add a stdio MCP server:

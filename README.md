@@ -36,7 +36,8 @@ MCP Client ──stdio──► WebSearch MCP
 
 - P0 仓库与测试基线：已完成。
 - P1 旧抓取服务清理与模块化：已完成。
-- 下一阶段：P2 Tavily 多 Key 错误分类、Key 级熔断和服务级熔断。
+- P2 Tavily 多 Key 可靠性：已完成。
+- 下一阶段：P3 Grok 主备模型与重试。
 
 完整需求与验收标准见 [开发路线文档](./docs/DEVELOPMENT_ROADMAP.md)。
 
@@ -103,6 +104,10 @@ switch_model
 | `TAVILY_API_KEYS` | 否 | - | 多个 Tavily Key，支持逗号、分号或换行分隔，优先于单 Key。 |
 | `TAVILY_API_URL` | 否 | `https://api.tavily.com` | Tavily API 根地址。 |
 | `TAVILY_ENABLED` | 否 | `true` | 是否启用 Tavily。 |
+| `TAVILY_KEY_COOLDOWN` | 否 | `30` | 临时限流或单 Key 临时异常的冷却秒数。 |
+| `TAVILY_QUOTA_COOLDOWN` | 否 | `3600` | 额度耗尽 Key 的默认冷却秒数。 |
+| `TAVILY_SERVICE_FAILURE_THRESHOLD` | 否 | `2` | 触发服务级熔断所需的不同 Key 同类故障数，最小为 2。 |
+| `TAVILY_SERVICE_COOLDOWN` | 否 | `30` | Tavily 服务级熔断冷却秒数。 |
 | `GROK_DEBUG` | 否 | `false` | 是否记录调试信息。 |
 | `GROK_LOG_LEVEL` | 否 | `INFO` | 日志级别。 |
 | `GROK_LOG_DIR` | 否 | `logs` | 日志目录。 |
@@ -133,7 +138,16 @@ switch_model
 TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
 ```
 
-当前版本会轮询选择 Key。Key 健康状态、错误分类和熔断属于下一阶段 P2，不应把当前轮询误认为完整的故障转移机制。
+正常请求会在健康 Key 间公平轮询，Search、Extract、Map 共享同一套运行时状态：
+
+- `healthy`：正常参与轮询。
+- `cooldown`：临时限流、超时、网络错误或临时服务异常，冷却后重新探测。
+- `quota_exhausted`：额度耗尽，使用较长冷却时间。
+- `invalid`：Key 无效或被撤销，本进程内不再使用。
+
+401/403 会使当前 Key 失效；429 会根据错误码、正文和 `Retry-After` 区分临时限流与额度耗尽；400/422 直接返回参数错误；404 提示检查 `TAVILY_API_URL`。多个不同 Key 出现相同 5xx 或网络错误时会触发服务级熔断，冷却后仅允许一次半开探测。
+
+所有 Key 不可用时，`web_fetch` 和 `web_map` 返回 `tavily_all_keys_unavailable` 及脱敏状态摘要。`web_search` 会保留已有 Grok 结果，但设置 `partial=true` 并返回 `tavily_error`，明确说明 Tavily 补充失败。该错误只终止当前工具调用，不会退出 MCP 进程。
 
 ## 常见问题
 
