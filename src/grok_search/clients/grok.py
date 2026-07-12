@@ -13,7 +13,7 @@ import httpx
 
 from ..config import config
 from ..logger import log_info
-from ..prompts import SEARCH_PROMPT
+from ..prompts import build_search_messages, current_time_context
 
 _RELAY_ACCOUNT_PATTERNS = (
     "上游账号不可用",
@@ -65,17 +65,12 @@ _AUTH_PATTERNS = (
 
 
 def get_local_time_info() -> str:
-    try:
-        local_now = datetime.now().astimezone()
-    except Exception:
-        local_now = datetime.now(timezone.utc)
-
-    weekdays_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    context = current_time_context()
     return (
         "[Current Time Context]\n"
-        f"- Date: {local_now.strftime('%Y-%m-%d')} ({weekdays_cn[local_now.weekday()]})\n"
-        f"- Time: {local_now.strftime('%H:%M:%S')}\n"
-        f"- Timezone: {local_now.tzname() or 'Local'}\n"
+        f"- Date: {context['date']}\n"
+        f"- Time: {context['time']}\n"
+        f"- Timezone: {context['timezone']}\n"
     )
 
 
@@ -242,20 +237,8 @@ class GrokClient:
         reported_fallback = fallback_model
         fallback = fallback_model if fallback_model and fallback_model != primary else None
 
-        platform_prompt = ""
-        if platform:
-            platform_prompt = (
-                "\n\nSearch the web for the information you need and focus on this platform: "
-                f"{platform}\n"
-            )
-        messages = [
-            {"role": "system", "content": SEARCH_PROMPT},
-            {
-                "role": "user",
-                "content": get_local_time_info() + "\n" + query + platform_prompt,
-            },
-        ]
-        await log_info(ctx, f"platform_prompt: {query + platform_prompt}", config.debug_enabled)
+        messages = build_search_messages(query, platform)
+        await log_info(ctx, "Prepared bounded search request", config.debug_enabled)
 
         counts = {primary: 0}
         if fallback:
