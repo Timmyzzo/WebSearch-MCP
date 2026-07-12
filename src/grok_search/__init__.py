@@ -1,3 +1,4 @@
-from .server import mcp
+from . import tools
+from .app import mcp
 
-__all__ = ["mcp"]
+__all__ = ["mcp", "tools"]

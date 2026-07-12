@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grok-search"
-version = "0.1.0"
-description = "MCP server for AI model search capabilities"
+version = "0.2.0"
+description = "Cross-client MCP server for Grok web search and Tavily extraction"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,12 +17,30 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "ruff>=0.9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Timmyzzo/WebSearch-MCP"
+Repository = "https://github.com/Timmyzzo/WebSearch-MCP"
+Issues = "https://github.com/Timmyzzo/WebSearch-MCP/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [project.scripts]
 grok-search = "grok_search.server:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

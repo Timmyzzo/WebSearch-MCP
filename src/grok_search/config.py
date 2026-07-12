@@ -1,15 +1,16 @@
-import os
 import json
+import os
 import re
 from pathlib import Path
 from threading import Lock
 
+
 class Config:
     _instance = None
     _SETUP_COMMAND = (
-        'claude mcp add-json grok-search --scope user '
+        "claude mcp add-json grok-search --scope user "
         '\'{"type":"stdio","command":"uvx","args":["--from",'
-        '"git+https://github.com/GuDaStudio/GrokSearch","grok-search"],'
+        '"git+https://github.com/Timmyzzo/WebSearch-MCP","grok-search"],'
         '"env":{"GROK_API_URL":"your-api-url","GROK_API_KEY":"your-api-key"}}\''
     )
     _DEFAULT_MODEL = "grok-4-fast"
@@ -39,16 +40,16 @@ class Config:
         if not self.config_file.exists():
             return {}
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             return {}
 
     def _save_config_file(self, config_data: dict) -> None:
         try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=2)
-        except IOError as e:
+        except OSError as e:
             raise ValueError(f"无法保存配置文件: {str(e)}")
 
     @property
@@ -72,8 +73,7 @@ class Config:
         url = os.getenv("GROK_API_URL")
         if not url:
             raise ValueError(
-                f"Grok API URL 未配置！\n"
-                f"请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
+                f"Grok API URL 未配置！\n请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
             )
         return url
 
@@ -82,8 +82,7 @@ class Config:
         key = os.getenv("GROK_API_KEY")
         if not key:
             raise ValueError(
-                f"Grok API Key 未配置！\n"
-                f"请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
+                f"Grok API Key 未配置！\n请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
             )
         return key
 
@@ -103,6 +102,8 @@ class Config:
 
     @property
     def tavily_api_keys(self) -> list[str]:
+        if not self.tavily_enabled:
+            return []
         keys = self._split_api_keys(os.getenv("TAVILY_API_KEYS"))
         if keys:
             return keys
@@ -121,14 +122,6 @@ class Config:
             key = keys[self._tavily_key_index % len(keys)]
             self._tavily_key_index = (self._tavily_key_index + 1) % len(keys)
             return key
-
-    @property
-    def firecrawl_api_url(self) -> str:
-        return os.getenv("FIRECRAWL_API_URL", "https://api.firecrawl.dev/v2")
-
-    @property
-    def firecrawl_api_key(self) -> str | None:
-        return os.getenv("FIRECRAWL_API_KEY")
 
     @property
     def log_level(self) -> str:
@@ -174,9 +167,7 @@ class Config:
             return self._cached_model
 
         model = (
-            os.getenv("GROK_MODEL")
-            or self._load_config_file().get("model")
-            or self._DEFAULT_MODEL
+            os.getenv("GROK_MODEL") or self._load_config_file().get("model") or self._DEFAULT_MODEL
         )
         self._cached_model = self._apply_model_suffix(model)
         return self._cached_model
@@ -224,9 +215,8 @@ class Config:
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
             "TAVILY_API_KEY": self._mask_api_keys(self.tavily_api_keys),
-            "FIRECRAWL_API_URL": self.firecrawl_api_url,
-            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
-            "config_status": config_status
+            "config_status": config_status,
         }
+
 
 config = Config()
