@@ -19,9 +19,14 @@ Minimum environment:
 ```text
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
+GROK_PRIMARY_MODEL=grok-4-fast
+GROK_FALLBACK_MODEL=grok-3-mini
+GROK_MODEL_MAX_ATTEMPTS=3
 ```
 
 Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
+
+If `GROK_PRIMARY_MODEL` is empty or unset, the compatibility variable `GROK_MODEL` is used before the persisted setting and `grok-4-fast`. The fallback is optional; identical primary/fallback IDs are not called twice. Each distinct model receives at most three real requests by default.
 
 Optional reliability settings are `TAVILY_KEY_COOLDOWN=30`, `TAVILY_QUOTA_COOLDOWN=3600`, `TAVILY_SERVICE_FAILURE_THRESHOLD=2`, and `TAVILY_SERVICE_COOLDOWN=30`. The defaults are appropriate for most setups.
 
@@ -42,6 +47,9 @@ Add a stdio MCP server:
       "env": {
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
+        "GROK_PRIMARY_MODEL": "grok-4-fast",
+        "GROK_FALLBACK_MODEL": "grok-3-mini",
+        "GROK_MODEL_MAX_ATTEMPTS": "3",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
     }
@@ -68,6 +76,8 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
+    "GROK_PRIMARY_MODEL": "grok-4-fast",
+    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -90,6 +100,8 @@ $config = @'
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
+    "GROK_PRIMARY_MODEL": "grok-4-fast",
+    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }
@@ -123,6 +135,9 @@ tool_timeout_sec = 180
 [mcp_servers.grok-search.env]
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
+GROK_PRIMARY_MODEL = "grok-4-fast"
+GROK_FALLBACK_MODEL = "grok-3-mini"
+GROK_MODEL_MAX_ATTEMPTS = "3"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
 
@@ -159,6 +174,7 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 | Startup timeout | The first run may download dependencies; increase the startup timeout. |
 | Invalid JSON | Check quotes and trailing commas; use a PowerShell here-string on Windows. |
 | Grok connection failure | Verify the API root and `/models` support. |
+| Both Grok models fail | Inspect structured `grok_error` attempt counts and classification; authentication and request errors do not switch models. |
 | Fetch or map configuration error | Configure Tavily and ensure `TAVILY_ENABLED` is not `false`. |
 | Certificate verification failure | Add `--native-tls` or inspect the corporate proxy certificate. |
 

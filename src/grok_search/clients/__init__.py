@@ -1,4 +1,4 @@
-from .grok import GrokClient
+from .grok import GrokClient, GrokClientError
 from .tavily import TavilyClient, TavilyClientError
 
-__all__ = ["GrokClient", "TavilyClient", "TavilyClientError"]
+__all__ = ["GrokClient", "GrokClientError", "TavilyClient", "TavilyClientError"]

@@ -4,11 +4,17 @@ from grok_search.config import config
 
 
 @pytest.fixture(autouse=True)
-def reset_config_state(monkeypatch: pytest.MonkeyPatch):
+def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    config._config_file = tmp_path / "config.json"
     for name in (
         "GROK_API_URL",
         "GROK_API_KEY",
         "GROK_MODEL",
+        "GROK_PRIMARY_MODEL",
+        "GROK_FALLBACK_MODEL",
+        "GROK_MODEL_MAX_ATTEMPTS",
+        "GROK_RETRY_MULTIPLIER",
+        "GROK_RETRY_MAX_WAIT",
         "TAVILY_API_KEY",
         "TAVILY_API_KEYS",
         "TAVILY_API_URL",
@@ -21,6 +27,15 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(name, raising=False)
     config._cached_model = None
     config._tavily_key_index = 0
+    try:
+        from grok_search.tools import web
+
+        web._GROK_CLIENT = None
+        web._GROK_CLIENT_SIGNATURE = None
+        web._TAVILY_CLIENT = None
+    except ImportError:
+        pass
     yield
+    config._config_file = None
     config._cached_model = None
     config._tavily_key_index = 0

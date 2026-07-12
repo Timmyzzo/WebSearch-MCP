@@ -32,7 +32,8 @@ Typical uses include retrieving current official documentation, producing answer
 - P0 repository and test baseline: complete.
 - P1 legacy crawler removal and modularization: complete.
 - P2 Tavily multi-key reliability: complete.
-- Next: P3 Grok primary/fallback models and retries.
+- P3 Grok primary/fallback models and retries: complete.
+- Next: P4 unified response protocol.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
 
@@ -61,6 +62,9 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
+    "GROK_PRIMARY_MODEL": "grok-4-fast",
+    "GROK_FALLBACK_MODEL": "grok-3-mini",
+    "GROK_MODEL_MAX_ATTEMPTS": "3",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -89,7 +93,10 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | --- | --- | --- | --- |
 | `GROK_API_URL` | Yes | - | OpenAI-compatible API root with `/chat/completions` and `/models`. |
 | `GROK_API_KEY` | Yes | - | Grok API key. |
-| `GROK_MODEL` | No | `grok-4-fast` | Default Grok model. |
+| `GROK_PRIMARY_MODEL` | No | See below | Primary model used first for every Grok search. |
+| `GROK_FALLBACK_MODEL` | No | Unset | Fallback used after the primary model fails. |
+| `GROK_MODEL_MAX_ATTEMPTS` | No | `3` | Maximum real requests per distinct model; must be positive. |
+| `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
 | `TAVILY_API_URL` | No | `https://api.tavily.com` | Tavily API root. |
@@ -101,24 +108,35 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_DEBUG` | No | `false` | Enables debug logging. |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level. |
 | `GROK_LOG_DIR` | No | `logs` | Log directory. |
-| `GROK_RETRY_MAX_ATTEMPTS` | No | `3` | Grok retry setting. |
 | `GROK_RETRY_MULTIPLIER` | No | `1` | Exponential backoff multiplier. |
 | `GROK_RETRY_MAX_WAIT` | No | `10` | Maximum backoff in seconds. |
 
 With Grok alone, `web_search` remains available. Setting `TAVILY_ENABLED=false` disables Tavily even when keys are present.
 
+Primary-model precedence is: a model selected by `switch_model` in the current process, non-empty `GROK_PRIMARY_MODEL`, non-empty `GROK_MODEL`, the persisted primary model, then `grok-4-fast`. Whitespace-only environment values are treated as unset. An empty or missing fallback disables switching. If the normalized primary and fallback IDs are equal, only one primary attempt group runs.
+
 ## Tool overview
 
 | Tool | Purpose | Main response fields |
 | --- | --- | --- |
-| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `error` |
+| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `error`, `grok_error` |
 | `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count`, `error` |
 | `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `error` |
 | `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `error` |
 | `get_config_info` | Return masked configuration and test Grok | `configuration`, `connection_test` |
-| `switch_model` | Persist the default Grok model | `success`, `previous_model`, `current_model` |
+| `switch_model` | Persist and select the primary Grok model | `success`, `previous_model`, `current_model` |
 
 `query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
+
+## Grok primary/fallback models and retries
+
+Each call starts with the primary model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay errors such as unavailable/dead upstream accounts or an unavailable account pool are retried with jittered exponential backoff. Each distinct model receives at most `GROK_MODEL_MAX_ATTEMPTS` real requests. The fallback has an independent counter, is selected at most once, and never loops back to the primary.
+
+Model-not-found, model-permission, and model-temporarily-unavailable errors stop attempts for that model and switch early. Explicit 400/422 request errors and 401/403 or explicit API-key authentication failures stop immediately without retrying or switching. Classification combines the HTTP status with OpenAI-compatible error objects, codes, types, and response semantics.
+
+Stream content is buffered until a valid completion signal. Partial content from an interrupted stream is never returned as a complete answer, cached, or used to extract sources. Final failures include a structured `grok_error` with both model names, per-model and total attempt counts, the last classification, HTTP/upstream code, and whether switching occurred. API keys and Authorization values are excluded. Successful Tavily results never masquerade as a complete Grok answer, and only the current MCP tool call ends.
+
+`switch_model(model)` keeps its original call shape but now explicitly changes the primary model. It updates the active process and persists `primary_model` plus the legacy `model` field. It never changes `GROK_FALLBACK_MODEL`.
 
 ## Multiple Tavily keys
 

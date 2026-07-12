@@ -5,10 +5,11 @@ from fastmcp import Context
 from pydantic import Field
 
 from ..app import mcp
-from ..clients import GrokClient, TavilyClient, TavilyClientError
+from ..clients import GrokClient, GrokClientError, TavilyClient, TavilyClientError
 from ..config import config
 from ..logger import log_info
 from ..models import (
+    GrokErrorDetail,
     Source,
     SourcesResponse,
     TavilyErrorDetail,
@@ -23,10 +24,26 @@ _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
+_GROK_CLIENT: GrokClient | None = None
+_GROK_CLIENT_SIGNATURE: tuple[str, str] | None = None
+_GROK_CLIENT_LOCK = asyncio.Lock()
 
 
-def _new_grok_client(api_url: str, api_key: str, model: str) -> GrokClient:
-    return GrokClient(api_url, api_key, model)
+def _new_grok_client(api_url: str, api_key: str) -> GrokClient:
+    return GrokClient(api_url, api_key)
+
+
+async def _get_grok_client(api_url: str, api_key: str) -> GrokClient:
+    global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE
+    signature = (api_url, api_key)
+    async with _GROK_CLIENT_LOCK:
+        if _GROK_CLIENT is not None and _GROK_CLIENT_SIGNATURE != signature:
+            await _GROK_CLIENT.aclose()
+            _GROK_CLIENT = None
+        if _GROK_CLIENT is None:
+            _GROK_CLIENT = _new_grok_client(api_url, api_key)
+            _GROK_CLIENT_SIGNATURE = signature
+        return _GROK_CLIENT
 
 
 def _new_tavily_client() -> TavilyClient:
@@ -51,6 +68,16 @@ async def close_tavily_client() -> None:
         await client.aclose()
 
 
+async def close_grok_client() -> None:
+    global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE
+    async with _GROK_CLIENT_LOCK:
+        client = _GROK_CLIENT
+        _GROK_CLIENT = None
+        _GROK_CLIENT_SIGNATURE = None
+    if client is not None:
+        await client.aclose()
+
+
 def _tavily_error_detail(exc: TavilyClientError) -> TavilyErrorDetail:
     return TavilyErrorDetail.model_validate(exc.to_dict())
 
@@ -62,7 +89,7 @@ async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
             return _AVAILABLE_MODELS_CACHE[key]
 
     try:
-        models = await _new_grok_client(api_url, api_key, config.grok_model).list_models()
+        models = await (await _get_grok_client(api_url, api_key)).list_models()
     except Exception:
         models = []
 
@@ -94,7 +121,7 @@ def _extra_results_to_sources(results: list[TavilySearchResult]) -> list[dict[st
         "Search the web with Grok and optionally add structured Tavily sources. "
         "Returns a session_id, answer content, and cached source count."
     ),
-    meta={"version": "2.1.0"},
+    meta={"version": "2.2.0"},
 )
 async def web_search(
     query: Annotated[str, Field(description="Clear, self-contained search query.", min_length=1)],
@@ -115,6 +142,9 @@ async def web_search(
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
+        configured_primary = config.grok_primary_model
+        configured_fallback = config.grok_fallback_model
+        max_attempts = config.grok_model_max_attempts
     except ValueError as exc:
         await _SOURCES_CACHE.set(session_id, [])
         message = f"配置错误: {exc}"
@@ -125,7 +155,7 @@ async def web_search(
             error="grok_configuration_error",
         )
 
-    effective_model = config.grok_model
+    effective_model = configured_primary
     if model:
         available = await _get_available_models_cached(api_url, api_key)
         if available and model not in available:
@@ -136,16 +166,23 @@ async def web_search(
                 sources_count=0,
                 error="invalid_model",
             )
-        effective_model = model
+        effective_model = config.normalize_model(model)
 
-    grok_client = _new_grok_client(api_url, api_key, effective_model)
+    grok_client = await _get_grok_client(api_url, api_key)
     tavily_count = extra_sources if config.tavily_api_keys else 0
 
-    async def safe_grok() -> str:
+    async def safe_grok() -> tuple[str | None, GrokClientError | None]:
         try:
-            return await grok_client.search(query, platform)
-        except Exception:
-            return ""
+            result = await grok_client.search(
+                query,
+                platform,
+                primary_model=effective_model,
+                fallback_model=configured_fallback,
+                max_attempts=max_attempts,
+            )
+            return result, None
+        except GrokClientError as exc:
+            return None, exc
 
     async def safe_tavily() -> tuple[list[TavilySearchResult], TavilyClientError | None]:
         if not tavily_count:
@@ -155,8 +192,19 @@ async def web_search(
         except TavilyClientError as exc:
             return [], exc
 
-    grok_result, tavily_outcome = await asyncio.gather(safe_grok(), safe_tavily())
+    grok_outcome, tavily_outcome = await asyncio.gather(safe_grok(), safe_tavily())
+    grok_result, grok_error = grok_outcome
     tavily_results, tavily_error = tavily_outcome
+    if grok_error is not None:
+        await _SOURCES_CACHE.set(session_id, [])
+        return WebSearchResponse(
+            session_id=session_id,
+            content="",
+            sources_count=0,
+            error=grok_error.code,
+            grok_error=GrokErrorDetail.model_validate(grok_error.to_dict()),
+            tavily_error=_tavily_error_detail(tavily_error) if tavily_error else None,
+        )
     answer, grok_sources = split_answer_and_sources(grok_result or "")
     all_sources = merge_sources(grok_sources, _extra_results_to_sources(tavily_results))
     await _SOURCES_CACHE.set(session_id, all_sources)
