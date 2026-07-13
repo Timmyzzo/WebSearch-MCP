@@ -18,18 +18,19 @@ def request_data(query: str, *, now: datetime | None = None) -> dict:
     return json.loads(content.removeprefix(prefix))
 
 
-def test_simple_fact_uses_short_bounded_strategy_without_fixed_long_template():
+def test_simple_fact_still_uses_bounded_deep_search():
     profile = classify_search_query("法国首都是什么？")
-    assert profile.depth == "fast"
-    assert profile.search_budget == "bounded: usually 1-2 targeted searches"
-    assert "concise" in profile.answer_style
-    assert "simple_fact" in profile.categories
-    assert classify_search_query("What is the capital of France?").depth == "fast"
+    assert profile.depth == "deep"
+    assert profile.search_budget == (
+        "bounded: usually 4-8 targeted searches; stop when key claims converge"
+    )
+    assert profile.query_expansion is True
+    assert classify_search_query("What is the capital of France?").depth == "deep"
 
 
-def test_single_official_document_query_uses_short_primary_source_path():
+def test_single_official_document_query_keeps_primary_focus_with_deep_search():
     profile = classify_search_query("Python pathlib 的官方文档")
-    assert profile.depth == "standard"
+    assert profile.depth == "deep"
     assert profile.primary_source_focus is True
     assert "single_official_document" in profile.categories
 
@@ -154,7 +155,7 @@ async def test_grok_payload_uses_independent_per_call_search_requests():
     await client.aclose()
 
     by_query = {item["query"]: item for item in captured}
-    assert by_query["法国首都是什么？"]["search_profile"]["depth"] == "fast"
+    assert by_query["法国首都是什么？"]["search_profile"]["depth"] == "deep"
     assert by_query["当前 GitHub SDK migration error"]["search_profile"]["depth"] == "deep"
     assert by_query["法国首都是什么？"] is not by_query[
         "当前 GitHub SDK migration error"

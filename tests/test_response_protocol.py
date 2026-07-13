@@ -16,21 +16,21 @@ def grok_failure(error_type: str = "upstream_unavailable") -> GrokClientError:
     code = {
         "authentication_error": "grok_authentication_error",
         "request_invalid": "grok_request_invalid",
-    }.get(error_type, "grok_primary_and_fallback_failed")
+    }.get(error_type, "grok_primary_failed")
     return GrokClientError(
         code=code,
         message="Grok request failed",
         primary_model="primary",
-        fallback_model="fallback",
+        fallback_model=None,
         primary_attempts=1,
-        fallback_attempts=0 if action == "fatal" else 1,
+        fallback_attempts=0,
         last_failure=_AttemptFailure(
             error_type,
             action=action,
             http_status=401 if error_type == "authentication_error" else 503,
             upstream_code=error_type,
         ),
-        switched_model=action != "fatal",
+        switched_model=False,
     )
 
 
@@ -104,7 +104,6 @@ def configure_grok(monkeypatch):
     monkeypatch.setenv("GROK_API_URL", "https://grok.example/v1")
     monkeypatch.setenv("GROK_API_KEY", "grok-secret")
     monkeypatch.setenv("GROK_PRIMARY_MODEL", "primary")
-    monkeypatch.setenv("GROK_FALLBACK_MODEL", "fallback")
 
 
 def configure_tavily(monkeypatch):
@@ -153,7 +152,7 @@ async def test_web_search_all_provider_combinations_and_legacy_mapping(monkeypat
     assert grok_only_error.status == "error"
     assert grok_only_error.content == ""
     assert grok_only_error.sources_count == 0
-    assert grok_only_error.error == "grok_primary_and_fallback_failed"
+    assert grok_only_error.error == "grok_primary_failed"
     assert grok_only_error.grok_error is not None
     assert grok_only_error.tavily_error is None
 
@@ -202,7 +201,7 @@ async def test_grok_auth_request_and_stream_errors_keep_stable_details(monkeypat
     for error_type, expected_code, retryable in (
         ("authentication_error", "grok_authentication_error", False),
         ("request_invalid", "grok_request_invalid", False),
-        ("stream_interrupted_after_content", "grok_primary_and_fallback_failed", True),
+        ("stream_interrupted_after_content", "grok_primary_failed", True),
     ):
         await web_tools.close_grok_client()
         monkeypatch.setattr(

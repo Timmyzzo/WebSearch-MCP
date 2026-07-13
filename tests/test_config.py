@@ -27,9 +27,9 @@ def test_grok_model_legacy_and_empty_values(monkeypatch, tmp_path):
 
 
 def test_grok_model_attempts_default_and_validation(monkeypatch):
-    assert config.grok_model_max_attempts == 3
-    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "5")
     assert config.grok_model_max_attempts == 5
+    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "7")
+    assert config.grok_model_max_attempts == 7
     monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "0")
     with pytest.raises(ValueError, match="大于或等于 1"):
         _ = config.grok_model_max_attempts
@@ -72,8 +72,8 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert info["GROK_API_KEY"] != "1234567890abcdef"
     assert set(info).issuperset({"GROK_API_URL", "GROK_API_KEY", "TAVILY_API_URL"})
     assert info["GROK_PRIMARY_MODEL"] == "grok-4-fast"
-    assert info["GROK_FALLBACK_MODEL"] == "未配置"
-    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 3
+    assert info["GROK_FALLBACK_MODEL"] == "已弃用（单模型模式）"
+    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 5
     assert all("fire" not in key.lower() for key in info)
 
 

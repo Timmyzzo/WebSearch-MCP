@@ -62,7 +62,7 @@ class Config:
     def grok_model_max_attempts(self) -> int:
         raw = os.getenv("GROK_MODEL_MAX_ATTEMPTS", "").strip()
         if not raw:
-            return 3
+            return 5
         try:
             value = int(raw)
         except ValueError as exc:
@@ -219,11 +219,8 @@ class Config:
 
     @property
     def grok_fallback_model(self) -> str | None:
-        file_config = self._load_config_file()
-        model = self._non_empty(os.getenv("GROK_FALLBACK_MODEL")) or self._non_empty(
-            file_config.get("fallback_model")
-        )
-        return self._apply_model_suffix(model) if model else None
+        """兼容旧配置读取；单模型模式不再启用备用模型。"""
+        return None
 
     @property
     def grok_model(self) -> str:
@@ -276,7 +273,7 @@ class Config:
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
             "GROK_PRIMARY_MODEL": self.grok_primary_model,
-            "GROK_FALLBACK_MODEL": self.grok_fallback_model or "未配置",
+            "GROK_FALLBACK_MODEL": "已弃用（单模型模式）",
             "GROK_MODEL_MAX_ATTEMPTS": max_attempts,
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,

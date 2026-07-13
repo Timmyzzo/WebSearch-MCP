@@ -14,14 +14,14 @@ class FailingGrokClient:
         from grok_search.clients.grok import GrokClientError, _AttemptFailure
 
         raise GrokClientError(
-            code="grok_primary_and_fallback_failed",
-            message="Grok 主模型和备用模型均不可用",
+            code="grok_primary_failed",
+            message="Grok 模型调用失败，已用尽当前模型的重试次数",
             primary_model="primary",
-            fallback_model="fallback",
+            fallback_model=None,
             primary_attempts=2,
-            fallback_attempts=2,
+            fallback_attempts=0,
             last_failure=_AttemptFailure("upstream_unavailable", action="retry", http_status=503),
-            switched_model=True,
+            switched_model=False,
         )
 
 
@@ -175,9 +175,9 @@ async def test_web_search_does_not_return_empty_success_when_both_providers_fail
 
     assert result.content == ""
     assert result.partial is False
-    assert result.error == "grok_primary_and_fallback_failed"
+    assert result.error == "grok_primary_failed"
     assert result.grok_error is not None
-    assert result.grok_error.total_attempts == 4
+    assert result.grok_error.total_attempts == 2
     assert result.tavily_error is not None
 
 
@@ -192,7 +192,7 @@ async def test_tavily_success_does_not_masquerade_as_grok_answer(monkeypatch):
     sources = await web_tools.get_sources(result.session_id)
 
     assert result.content == ""
-    assert result.error == "grok_primary_and_fallback_failed"
+    assert result.error == "grok_primary_failed"
     assert result.sources_count == 0
     assert sources.sources == []
     assert result.tavily_error is None

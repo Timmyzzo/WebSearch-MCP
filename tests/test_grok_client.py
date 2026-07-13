@@ -94,15 +94,13 @@ async def test_primary_retries_then_succeeds_without_real_sleep():
     assert sleeps == [0.5]
 
 
-async def test_primary_exhaustion_switches_and_fallback_retries_then_succeeds():
+async def test_deprecated_fallback_argument_is_ignored():
     models = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         model = json.loads(request.content)["model"]
         models.append(model)
-        if model == "primary" or models.count("fallback") == 1:
-            return error_response(503, "upstream_unavailable", "try later")
-        return sse("fallback answer")
+        return error_response(503, "upstream_unavailable", "try later")
 
     client = GrokClient(
         "https://grok.example/v1",
@@ -111,19 +109,22 @@ async def test_primary_exhaustion_switches_and_fallback_retries_then_succeeds():
         sleep=lambda _: _completed_sleep(),
     )
 
-    result = await client.search(
-        "q", primary_model="primary", fallback_model="fallback", max_attempts=2
-    )
+    with pytest.raises(GrokClientError) as caught:
+        await client.search(
+            "q", primary_model="primary", fallback_model="fallback", max_attempts=2
+        )
 
-    assert result == "fallback answer"
-    assert models == ["primary", "primary", "fallback", "fallback"]
+    assert models == ["primary", "primary"]
+    assert caught.value.fallback_model is None
+    assert caught.value.fallback_attempts == 0
+    assert caught.value.switched_model is False
 
 
 async def _completed_sleep() -> None:
     return None
 
 
-async def test_both_models_fail_with_exact_attempt_counts():
+async def test_single_model_fails_with_exact_attempt_count():
     async def handler(request: httpx.Request) -> httpx.Response:
         return error_response(429, "rate_limit", "busy")
 
@@ -140,13 +141,38 @@ async def test_both_models_fail_with_exact_attempt_counts():
         )
 
     error = caught.value
-    assert error.code == "grok_primary_and_fallback_failed"
+    assert error.code == "grok_primary_failed"
     assert error.primary_attempts == 3
-    assert error.fallback_attempts == 3
-    assert error.total_attempts == 6
-    assert error.switched_model is True
+    assert error.fallback_attempts == 0
+    assert error.total_attempts == 3
+    assert error.switched_model is False
     assert error.last_http_status == 429
     assert error.last_upstream_code == "rate_limit"
+
+
+async def test_default_single_model_retry_budget_is_five_real_requests(monkeypatch):
+    monkeypatch.delenv("GROK_MODEL_MAX_ATTEMPTS", raising=False)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return error_response(503, "upstream_unavailable", "try later")
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        "strong-model",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: _completed_sleep(),
+    )
+
+    with pytest.raises(GrokClientError) as caught:
+        await client.search("q")
+
+    assert calls == 5
+    assert caught.value.primary_attempts == 5
+    assert caught.value.total_attempts == 5
 
 
 async def test_no_fallback_and_same_fallback_only_run_one_attempt_group():
@@ -170,7 +196,7 @@ async def test_no_fallback_and_same_fallback_only_run_one_attempt_group():
                 "q", primary_model="primary", fallback_model=fallback, max_attempts=2
             )
         assert calls == 2
-        assert caught.value.fallback_model == fallback
+        assert caught.value.fallback_model is None
         assert caught.value.fallback_attempts == 0
         assert caught.value.switched_model is False
         assert caught.value.code == "grok_primary_failed"
@@ -252,23 +278,25 @@ async def test_relay_account_unavailable_retries_same_model():
         (503, "model_unavailable", "model temporarily unavailable"),
     ],
 )
-async def test_model_errors_switch_immediately(status, code, message):
-    models = []
+async def test_invalid_model_errors_stop_without_fallback(status, code, message):
+    calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        model = json.loads(request.content)["model"]
-        models.append(model)
-        return error_response(status, code, message) if model == "primary" else sse()
+        nonlocal calls
+        calls += 1
+        return error_response(status, code, message)
 
     client = GrokClient(
         "https://grok.example/v1",
         "secret",
         transport=httpx.MockTransport(handler),
     )
-    assert await client.search(
-        "q", primary_model="primary", fallback_model="fallback", max_attempts=3
-    ) == "ok"
-    assert models == ["primary", "fallback"]
+    with pytest.raises(GrokClientError):
+        await client.search(
+            "q", primary_model="primary", fallback_model="fallback", max_attempts=3
+        )
+    expected_calls = 3 if code == "model_unavailable" else 1
+    assert calls == expected_calls
 
 
 @pytest.mark.parametrize("status", [400, 422])
@@ -438,6 +466,6 @@ async def test_concurrent_searches_keep_attempt_state_isolated():
 
     assert all(isinstance(outcome, GrokClientError) for outcome in outcomes)
     assert [(outcome.primary_attempts, outcome.fallback_attempts) for outcome in outcomes] == [
-        (1, 1),
-        (1, 1),
+        (1, 0),
+        (1, 0),
     ]
