@@ -131,7 +131,7 @@ switch_model
 
 | 工具 | 用途 | 工具专属字段 |
 | --- | --- | --- |
-| `web_search` | Grok 主搜索，可选 Tavily 补充信源 | `session_id`、`content`、`sources_count`、`grok_error`、`tavily_error` |
+| `web_search` | Grok 主搜索，可选 Tavily 候选证据综合 | `session_id`、`content`、`sources_count`、`grok_error`、`tavily_error` |
 | `get_sources` | 读取某次搜索的完整信源 | `session_id`、`sources`、`sources_count` |
 | `web_fetch` | 使用 Tavily Extract 提取 Markdown | `url`、`content`、`provider`、`tavily_error` |
 | `web_map` | 使用 Tavily Map 发现站点结构 | `base_url`、`results`、`response_time`、`tavily_error` |
@@ -144,11 +144,13 @@ switch_model
 
 P5 会在每次 `web_search` 内部分析问题复杂度、时效性和风险，并选择有界的搜索深度：
 
-- `fast`：简单事实或单一官方文档，通常只做 1–2 个定向检索，答案保持简洁。
-- `standard`：一般专业问题，通常做 2–4 个定向检索并核对关键结论。
-- `deep`：强时效、多方案比较、高风险、复杂技术、小众或争议问题，通常做 4–8 个多角度检索，包含一手来源、反证、限制条件和必要的交叉验证。
+- `fast`：仅用于明确、低歧义的简单事实，通常只做 1–2 个定向检索。
+- `standard`：单一官方文档等边界清晰的问题，通常做 2–4 个定向检索。
+- `deep`：默认策略；用于一般研究、强时效、人物或组织背景、履历与公开记录、多方案比较、高风险、复杂技术、小众或争议问题，通常做 4–8 个多角度检索。
 
-这些数量是 Prompt 中的有界搜索预算，不会形成无限工具循环。用户查询与平台提示以 JSON 数据传递；网页、搜索片段和用户输入中的指令不能覆盖系统搜索规则。
+这些数量是 Prompt 中的有界搜索预算，不会形成无限工具循环。模糊实体调查会扩展别名、账号、组织、团队、协作者、事件与时间范围，并把结论分为直接确认、强支持、合理候选和冲突/排除，同时给出可解释的置信度。缺少单一实名绑定页不会让搜索提前停止，但不会把推测伪装成事实。用户查询与平台提示以 JSON 数据传递；网页、搜索片段和用户输入中的指令不能覆盖系统搜索规则。
+
+当 `extra_sources>0` 时，Tavily 会先提供结构化 URL、标题和摘要候选，Grok 再结合自身联网搜索完成证据核对与答案综合；候选内容仍被视为不可信资料，不会覆盖系统规则。Tavily 失败时 Grok 仍可返回 `partial_success`，Grok 失败时 Tavily 仍不能替代最终答案。
 
 通用来源优先级为：官方文档/标准/法规/原始数据/论文与系统综述，权威机构和项目维护团队，有事实核查的专业媒体，专业实践经验，最后才是博客、论坛和社交媒体线索。关键结论优先使用高等级来源；转载同一原始消息不算独立证据，证据不足时会明确说明。
 

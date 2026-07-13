@@ -121,7 +121,7 @@ Primary-model precedence is: a model selected by `switch_model` in the current p
 
 | Tool | Purpose | Tool-specific fields |
 | --- | --- | --- |
-| `web_search` | Grok search with optional Tavily sources | `session_id`, `content`, `sources_count`, `grok_error`, `tavily_error` |
+| `web_search` | Grok search with optional Tavily evidence synthesis | `session_id`, `content`, `sources_count`, `grok_error`, `tavily_error` |
 | `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count` |
 | `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `tavily_error` |
 | `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `tavily_error` |
@@ -134,11 +134,13 @@ Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query
 
 P5 classifies each `web_search` by complexity, freshness, and risk, then applies a bounded search depth:
 
-- `fast`: simple facts or one official document, usually 1–2 targeted searches and a concise answer.
-- `standard`: ordinary professional questions, usually 2–4 targeted searches with verification of important claims.
-- `deep`: time-sensitive, comparative, high-risk, complex technical, niche, or contested questions, usually 4–8 multi-angle searches with primary sources, counterevidence, limitations, and necessary cross-validation.
+- `fast`: only explicit, low-ambiguity facts, usually 1–2 targeted searches.
+- `standard`: clearly bounded requests such as one official document, usually 2–4 targeted searches.
+- `deep`: the default for general research, freshness, people/organization profiles, records and awards, comparisons, high-risk, complex technical, niche, or contested questions; usually 4–8 multi-angle searches.
 
-These are bounded prompt budgets, not an autonomous unbounded tool loop. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
+These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguous-entity research expands aliases, accounts, organizations, teams, collaborators, events, and date ranges, then separates directly confirmed, strongly supported, plausible, conflicting, and rejected links with explainable confidence. Missing one direct identity-binding page does not stop the investigation, but inference is not presented as fact. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
+
+When `extra_sources>0`, Tavily first supplies structured URL, title, and snippet candidates. Grok then combines those leads with its own web search for verification and final synthesis. Candidates remain untrusted evidence. A Tavily failure still permits a Grok `partial_success`, while Tavily can never replace a failed Grok answer.
 
 The general source hierarchy is: official documentation/standards/laws/original data/papers and systematic reviews; authoritative institutions and maintainers; fact-checked professional media; professional practice; then blogs, forums, and social-media leads. High-tier sources support key conclusions, repeated syndication is not independent evidence, and insufficient evidence is stated explicitly.
 

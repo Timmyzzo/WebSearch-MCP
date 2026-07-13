@@ -169,7 +169,7 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 
 The canonical error object is `error_detail`, with at least `code`, `message`, `service`, and `retryable`; it also includes `http_status`, `upstream_code`, and redacted `diagnostics` when available. Legacy `error`, `partial`, `tavily_error`, and `grok_error` fields remain available.
 
-P5 adds no client parameters or response fields. `web_search` internally selects a bounded fast, standard, or deep strategy from the query's complexity, freshness, and risk; “latest/current” requests use the server's actual runtime date and timezone. Clients continue to send the existing `query` plus optional `platform`, `model`, and `extra_sources` fields.
+P5 adds no client parameters or response fields. `web_search` defaults to bounded deep research; only explicit low-ambiguity facts and one-document requests use shorter paths. People, organization, biography, award, and public-record queries expand aliases and express confidence. “Latest/current” requests use the runtime date and timezone. With `extra_sources>0`, Tavily candidates enter Grok's final synthesis. Existing client parameters remain unchanged.
 
 ## 7. Troubleshooting
 
