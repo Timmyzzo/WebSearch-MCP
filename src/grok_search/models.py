@@ -56,6 +56,12 @@ class GrokErrorDetail(BaseModel):
     last_http_status: int | None = None
     last_upstream_code: str | None = None
     switched_model: bool = False
+    termination_reason: str = "max_attempts_exhausted"
+    configured_max_attempts: int = Field(default=0, ge=0)
+    actual_attempts: int = Field(default=0, ge=0)
+    elapsed_ms: int = Field(default=0, ge=0)
+    budget_ms: int = Field(default=0, ge=0)
+    queue_wait_ms: int = Field(default=0, ge=0)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -5,7 +5,9 @@ from fastmcp import Context
 from pydantic import Field
 
 from ..app import mcp
+from ..budget import RequestBudget
 from ..clients import GrokClient, GrokClientError, TavilyClient, TavilyClientError
+from ..concurrency import AsyncConcurrencyLimiter
 from ..config import config
 from ..logger import log_info
 from ..models import (
@@ -28,17 +30,28 @@ _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
 _GROK_CLIENT: GrokClient | None = None
-_GROK_CLIENT_SIGNATURE: tuple[str, str] | None = None
+_GROK_CLIENT_SIGNATURE: tuple[str, str, int] | None = None
 _GROK_CLIENT_LOCK = asyncio.Lock()
+_GROK_CONCURRENCY_LIMITER: AsyncConcurrencyLimiter | None = None
 
 
 def _new_grok_client(api_url: str, api_key: str) -> GrokClient:
-    return GrokClient(api_url, api_key)
+    global _GROK_CONCURRENCY_LIMITER
+    if (
+        _GROK_CONCURRENCY_LIMITER is None
+        or _GROK_CONCURRENCY_LIMITER.limit != config.grok_max_concurrency
+    ):
+        _GROK_CONCURRENCY_LIMITER = AsyncConcurrencyLimiter(config.grok_max_concurrency)
+    return GrokClient(
+        api_url,
+        api_key,
+        concurrency_limiter=_GROK_CONCURRENCY_LIMITER,
+    )
 
 
 async def _get_grok_client(api_url: str, api_key: str) -> GrokClient:
     global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE
-    signature = (api_url, api_key)
+    signature = (api_url, api_key, config.grok_max_concurrency)
     async with _GROK_CLIENT_LOCK:
         if _GROK_CLIENT is not None and _GROK_CLIENT_SIGNATURE != signature:
             await _GROK_CLIENT.aclose()
@@ -59,6 +72,7 @@ def _new_tavily_client() -> TavilyClient:
             quota_cooldown=config.tavily_quota_cooldown,
             service_failure_threshold=config.tavily_service_failure_threshold,
             service_cooldown=config.tavily_service_cooldown,
+            per_key_max_concurrency=config.tavily_per_key_max_concurrency,
         )
     return _TAVILY_CLIENT
 
@@ -72,11 +86,12 @@ async def close_tavily_client() -> None:
 
 
 async def close_grok_client() -> None:
-    global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE
+    global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE, _GROK_CONCURRENCY_LIMITER
     async with _GROK_CLIENT_LOCK:
         client = _GROK_CLIENT
         _GROK_CLIENT = None
         _GROK_CLIENT_SIGNATURE = None
+        _GROK_CONCURRENCY_LIMITER = None
     if client is not None:
         await client.aclose()
 
@@ -170,6 +185,53 @@ def _tavily_results_to_evidence(
     return evidence
 
 
+def _grok_budget_error(
+    *,
+    model: str,
+    max_attempts: int,
+    budget: RequestBudget,
+    termination_reason: str = "total_budget_exhausted",
+) -> GrokErrorDetail:
+    queue_timeout = termination_reason == "concurrency_queue_timeout"
+    return GrokErrorDetail(
+        code="grok_concurrency_timeout" if queue_timeout else "grok_total_budget_exhausted",
+        message=(
+            "Grok 模型调用失败，等待上游并发槽位时预算耗尽"
+            if queue_timeout
+            else "Grok 模型调用失败，搜索总时间预算已耗尽"
+        ),
+        retryable=True,
+        primary_model=model,
+        fallback_model=None,
+        primary_attempts=0,
+        fallback_attempts=0,
+        total_attempts=0,
+        last_error_type=(
+            "concurrency_queue_timeout" if queue_timeout else "total_budget_exhausted"
+        ),
+        switched_model=False,
+        termination_reason=termination_reason,
+        configured_max_attempts=max_attempts,
+        actual_attempts=0,
+        elapsed_ms=budget.elapsed_ms,
+        budget_ms=budget.budget_ms,
+        queue_wait_ms=budget.queue_wait_ms("grok"),
+        diagnostics={
+            "termination_reason": termination_reason,
+            "configured_max_attempts": max_attempts,
+            "actual_attempts": 0,
+            "elapsed_ms": budget.elapsed_ms,
+            "budget_ms": budget.budget_ms,
+            "queue_wait_ms": budget.queue_wait_ms("grok"),
+            "last_error_type": (
+                "concurrency_queue_timeout" if queue_timeout else "total_budget_exhausted"
+            ),
+            "last_http_status": None,
+            "last_upstream_code": None,
+        },
+    )
+
+
 @mcp.tool(
     name="web_search",
     description=(
@@ -199,10 +261,13 @@ async def web_search(
 ) -> WebSearchResponse:
     session_id = new_session_id()
     try:
+        total_timeout = config.web_search_total_timeout
+        budget = RequestBudget(total_timeout)
         api_url = config.grok_api_url
         api_key = config.grok_api_key
         configured_primary = config.grok_primary_model
         max_attempts = config.grok_model_max_attempts
+        _ = config.grok_max_concurrency
     except ValueError as exc:
         message = f"配置错误: {exc}"
         detail = make_error_detail(
@@ -224,7 +289,24 @@ async def web_search(
     effective_model = configured_primary
     if model:
         try:
-            available = await _get_available_models_cached(api_url, api_key)
+            async with asyncio.timeout(budget.remaining() + 0.1):
+                available = await _get_available_models_cached(api_url, api_key)
+        except TimeoutError:
+            grok_detail = _grok_budget_error(
+                model=effective_model,
+                max_attempts=max_attempts,
+                budget=budget,
+            )
+            detail = error_from_grok(grok_detail)
+            return WebSearchResponse(
+                status="error",
+                session_id=session_id,
+                content="",
+                sources_count=0,
+                error=_legacy_error(detail),
+                error_detail=detail,
+                grok_error=grok_detail,
+            )
         except Exception as exc:
             detail = _grok_catalog_error(exc)
             return WebSearchResponse(
@@ -260,14 +342,25 @@ async def web_search(
         supplemental_sources: list[dict[str, str]],
     ) -> tuple[str | None, GrokErrorDetail | None, ErrorDetail | None]:
         try:
-            result = await grok_client.search(
-                query,
-                platform,
-                primary_model=effective_model,
-                max_attempts=max_attempts,
-                supplemental_sources=supplemental_sources,
-            )
+            if budget.remaining() <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(budget.remaining() + 0.1):
+                result = await grok_client.search(
+                    query,
+                    platform,
+                    primary_model=effective_model,
+                    max_attempts=max_attempts,
+                    supplemental_sources=supplemental_sources,
+                    budget=budget,
+                )
             return result, None, None
+        except TimeoutError:
+            detail = _grok_budget_error(
+                model=effective_model,
+                max_attempts=max_attempts,
+                budget=budget,
+            )
+            return None, detail, error_from_grok(detail)
         except GrokClientError as exc:
             detail = GrokErrorDetail.model_validate(exc.to_dict())
             return None, detail, error_from_grok(detail)
@@ -279,7 +372,28 @@ async def web_search(
         if not tavily_count:
             return [], None, None
         try:
-            return await _new_tavily_client().search(query, tavily_count), None, None
+            if budget.remaining() <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(budget.remaining() + 0.1):
+                result = await _new_tavily_client().search(
+                    query,
+                    tavily_count,
+                    budget=budget,
+                )
+            return result, None, None
+        except TimeoutError:
+            detail = TavilyErrorDetail(
+                code="tavily_total_budget_exhausted",
+                message="Tavily 请求总时间预算已耗尽",
+                retryable=True,
+                diagnostics={
+                    "termination_reason": "total_budget_exhausted",
+                    "elapsed_ms": budget.elapsed_ms,
+                    "budget_ms": budget.budget_ms,
+                    "queue_wait_ms": budget.queue_wait_ms("tavily"),
+                },
+            )
+            return [], detail, error_from_tavily(detail)
         except TavilyClientError as exc:
             detail = _tavily_error_detail(exc)
             return [], detail, error_from_tavily(detail)
@@ -437,8 +551,9 @@ async def web_fetch(
     ctx: Context | None = None,
 ) -> WebFetchResponse:
     await log_info(ctx, f"Begin Fetch: {url}", config.debug_enabled)
+    budget = RequestBudget(60.0)
     try:
-        content = await _new_tavily_client().extract(url)
+        content = await _new_tavily_client().extract(url, budget=budget)
     except TavilyClientError as exc:
         await log_info(ctx, "Fetch Failed!", config.debug_enabled)
         tavily_detail = _tavily_error_detail(exc)
@@ -505,6 +620,7 @@ async def web_map(
         Field(description="Operation timeout in seconds.", ge=10, le=150),
     ] = 150,
 ) -> WebMapResponse:
+    budget = RequestBudget(float(timeout + 10))
     try:
         result = await _new_tavily_client().map(
             url=url,
@@ -513,6 +629,7 @@ async def web_map(
             max_breadth=max_breadth,
             limit=limit,
             timeout=timeout,
+            budget=budget,
         )
     except TavilyClientError as exc:
         tavily_detail = _tavily_error_detail(exc)

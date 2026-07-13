@@ -35,6 +35,27 @@ def test_grok_model_attempts_default_and_validation(monkeypatch):
         _ = config.grok_model_max_attempts
 
 
+def test_timeout_and_concurrency_defaults_and_safety_bounds(monkeypatch):
+    assert config.web_search_total_timeout == 270
+    assert config.grok_max_concurrency == 2
+    assert config.tavily_per_key_max_concurrency == 1
+
+    monkeypatch.setenv("WEB_SEARCH_TOTAL_TIMEOUT", "240.5")
+    monkeypatch.setenv("GROK_MAX_CONCURRENCY", "1")
+    assert config.web_search_total_timeout == 240.5
+    assert config.grok_max_concurrency == 1
+
+    monkeypatch.setenv("WEB_SEARCH_TOTAL_TIMEOUT", "0")
+    with pytest.raises(ValueError, match="大于 0"):
+        _ = config.web_search_total_timeout
+    monkeypatch.setenv("GROK_MAX_CONCURRENCY", "3")
+    with pytest.raises(ValueError, match="1 或 2"):
+        _ = config.grok_max_concurrency
+    monkeypatch.setenv("TAVILY_PER_KEY_MAX_CONCURRENCY", "2")
+    with pytest.raises(ValueError, match="必须为 1"):
+        _ = config.tavily_per_key_max_concurrency
+
+
 def test_tavily_keys_support_all_documented_separators(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEYS", "first, second;third\nfourth\r\nfifth")
 
@@ -74,6 +95,9 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert info["GROK_PRIMARY_MODEL"] == "grok-4-fast"
     assert info["GROK_FALLBACK_MODEL"] == "已弃用（单模型模式）"
     assert info["GROK_MODEL_MAX_ATTEMPTS"] == 5
+    assert info["GROK_MAX_CONCURRENCY"] == 2
+    assert info["WEB_SEARCH_TOTAL_TIMEOUT"] == 270
+    assert info["TAVILY_PER_KEY_MAX_CONCURRENCY"] == 1
     assert all("fire" not in key.lower() for key in info)
 
 

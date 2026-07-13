@@ -25,6 +25,10 @@ class TavilyServiceState(str, Enum):
     HALF_OPEN = "half_open"
 
 
+class TavilyConcurrencyTimeout(TimeoutError):
+    pass
+
+
 def key_fingerprint(key: str) -> str:
     """Return a stable, non-secret identifier suitable for diagnostics."""
     if not key or len(key) <= 8:
@@ -86,6 +90,7 @@ class TavilyReliabilityManager:
         quota_cooldown: float = 3600.0,
         service_failure_threshold: int = 2,
         service_cooldown: float = 30.0,
+        per_key_max_concurrency: int = 1,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         unique_keys = list(dict.fromkeys(key for key in keys if key))
@@ -94,9 +99,14 @@ class TavilyReliabilityManager:
         self._quota_cooldown = max(0.0, quota_cooldown)
         self._service_failure_threshold = max(2, service_failure_threshold)
         self._service_cooldown = max(0.0, service_cooldown)
+        if per_key_max_concurrency < 1:
+            raise ValueError("Tavily 每 Key 并发上限必须大于或等于 1")
+        self._per_key_max_concurrency = per_key_max_concurrency
         self._clock = clock
         self._cursor = 0
-        self._lock = asyncio.Lock()
+        self._condition = asyncio.Condition()
+        self._lock = self._condition
+        self._in_flight: dict[str, int] = defaultdict(int)
         self._service_state = TavilyServiceState.CLOSED
         self._service_open_until = 0.0
         self._half_open_key: str | None = None
@@ -111,31 +121,53 @@ class TavilyReliabilityManager:
         return self._service_state
 
     async def acquire_key(self, excluded: set[str] | None = None) -> str | None:
+        """Compatibility scheduler that does not reserve a concurrency slot."""
         excluded = excluded or set()
         async with self._lock:
-            now = self._clock()
-            service_probe_ready = False
-            if self._service_state is TavilyServiceState.OPEN:
-                if now < self._service_open_until:
+            key, _ = self._select_key_locked(excluded, reserve=False)
+            return key
+
+    async def acquire_key_slot(
+        self,
+        excluded: set[str] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> str | None:
+        """Reserve one healthy key, waiting only when eligible keys are busy."""
+        excluded = excluded or set()
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + max(0.0, timeout)
+        async with self._condition:
+            while True:
+                key, busy = self._select_key_locked(excluded, reserve=True)
+                if key is not None:
+                    return key
+                if not busy:
                     return None
-                service_probe_ready = True
+                remaining = None if deadline is None else deadline - loop.time()
+                if remaining is not None and remaining <= 0:
+                    raise TavilyConcurrencyTimeout
+                try:
+                    if remaining is None:
+                        await self._condition.wait()
+                    else:
+                        async with asyncio.timeout(remaining):
+                            await self._condition.wait()
+                except TimeoutError as exc:
+                    raise TavilyConcurrencyTimeout from exc
 
-            if self._service_state is TavilyServiceState.HALF_OPEN and self._half_open_key:
-                return None
-
-            count = len(self._keys)
-            for offset in range(count):
-                index = (self._cursor + offset) % count
-                item = self._keys[index]
-                item.refresh(now)
-                if item.key in excluded or item.state is not TavilyKeyState.HEALTHY:
-                    continue
-                self._cursor = (index + 1) % count
-                if service_probe_ready:
-                    self._service_state = TavilyServiceState.HALF_OPEN
-                    self._half_open_key = item.key
-                return item.key
-            return None
+    async def release_key(self, key: str) -> None:
+        async with self._condition:
+            if self._in_flight.get(key, 0) > 0:
+                self._in_flight[key] -= 1
+                if self._in_flight[key] <= 0:
+                    self._in_flight.pop(key, None)
+            if (
+                self._service_state is TavilyServiceState.HALF_OPEN
+                and key == self._half_open_key
+            ):
+                self._open_service(self._clock())
+            self._condition.notify_all()
 
     async def mark_success(self, key: str) -> None:
         async with self._lock:
@@ -153,6 +185,7 @@ class TavilyReliabilityManager:
             self._service_state = TavilyServiceState.CLOSED
             self._service_open_until = 0.0
             self._half_open_key = None
+            self._condition.notify_all()
 
     async def mark_invalid(self, key: str, reason: str) -> None:
         async with self._lock:
@@ -161,6 +194,7 @@ class TavilyReliabilityManager:
                 item.state = TavilyKeyState.INVALID
                 item.unavailable_until = 0.0
                 item.last_error = reason
+            self._condition.notify_all()
 
     async def mark_rate_limited(
         self,
@@ -183,6 +217,7 @@ class TavilyReliabilityManager:
             cooldown = retry_after if retry_after is not None else fallback
             item.unavailable_until = self._clock() + cooldown
             item.last_error = reason
+            self._condition.notify_all()
 
     async def mark_temporary_failure(self, key: str, signature: str, reason: str) -> None:
         async with self._lock:
@@ -200,6 +235,7 @@ class TavilyReliabilityManager:
             self._failures[signature].add(key)
             if len(self._failures[signature]) >= self._service_failure_threshold:
                 self._open_service(now)
+            self._condition.notify_all()
 
     async def status_summary(self) -> list[dict[str, object]]:
         async with self._lock:
@@ -210,6 +246,7 @@ class TavilyReliabilityManager:
                 summary: dict[str, object] = {
                     "fingerprint": key_fingerprint(item.key),
                     "state": item.state.value,
+                    "in_flight": self._in_flight.get(item.key, 0),
                 }
                 if item.unavailable_until > now:
                     summary["retry_after_seconds"] = round(item.unavailable_until - now, 3)
@@ -229,6 +266,42 @@ class TavilyReliabilityManager:
 
     def _find(self, key: str) -> TavilyKeyHealth | None:
         return next((item for item in self._keys if item.key == key), None)
+
+    def _select_key_locked(
+        self,
+        excluded: set[str],
+        *,
+        reserve: bool,
+    ) -> tuple[str | None, bool]:
+        now = self._clock()
+        service_probe_ready = False
+        if self._service_state is TavilyServiceState.OPEN:
+            if now < self._service_open_until:
+                return None, False
+            service_probe_ready = True
+
+        if self._service_state is TavilyServiceState.HALF_OPEN and self._half_open_key:
+            return None, False
+
+        busy_eligible = False
+        count = len(self._keys)
+        for offset in range(count):
+            index = (self._cursor + offset) % count
+            item = self._keys[index]
+            item.refresh(now)
+            if item.key in excluded or item.state is not TavilyKeyState.HEALTHY:
+                continue
+            if reserve and self._in_flight[item.key] >= self._per_key_max_concurrency:
+                busy_eligible = True
+                continue
+            self._cursor = (index + 1) % count
+            if service_probe_ready:
+                self._service_state = TavilyServiceState.HALF_OPEN
+                self._half_open_key = item.key
+            if reserve:
+                self._in_flight[item.key] += 1
+            return item.key, busy_eligible
+        return None, busy_eligible
 
     def _open_service(self, now: float) -> None:
         self._service_state = TavilyServiceState.OPEN

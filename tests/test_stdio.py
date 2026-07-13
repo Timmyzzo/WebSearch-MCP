@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -237,3 +238,71 @@ async def test_stdio_unified_success_partial_error_validation_and_survival():
     assert {tool.name for tool in tools_after_errors.tools}.issuperset(
         {"web_search", "get_sources", "web_fetch", "web_map"}
     )
+
+
+async def test_stdio_web_search_budget_timeout_is_structured_and_server_stays_alive():
+    class SlowSearchFastModelsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"data":[{"id":"primary"}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            time.sleep(0.2)
+            body = b'data: {"choices":[{"delta":{"content":"late"}}]}\n\ndata: [DONE]\n\n'
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, format, *args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), SlowSearchFastModelsHandler)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src")
+    env["GROK_API_URL"] = f"http://127.0.0.1:{upstream.server_port}"
+    env["GROK_API_KEY"] = "grok-secret-key"
+    env["GROK_PRIMARY_MODEL"] = "primary"
+    env["GROK_MODEL_MAX_ATTEMPTS"] = "5"
+    env["WEB_SEARCH_TOTAL_TIMEOUT"] = "0.05"
+    env["TAVILY_ENABLED"] = "false"
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "grok_search.server"],
+        cwd=root,
+        env=env,
+        encoding="utf-8",
+        encoding_error_handler="replace",
+    )
+
+    try:
+        async with stdio_client(server) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                timed_out = await session.call_tool("web_search", {"query": "slow"})
+                config_after_timeout = await session.call_tool("get_config_info", {})
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    structured = timed_out.structuredContent
+    assert timed_out.isError is False
+    assert structured["status"] == "error"
+    assert structured["error"] == "grok_total_budget_exhausted"
+    assert structured["grok_error"]["termination_reason"] == "total_budget_exhausted"
+    assert structured["grok_error"]["actual_attempts"] == 1
+    assert structured["grok_error"]["configured_max_attempts"] == 5
+    assert config_after_timeout.isError is False
+    assert config_after_timeout.structuredContent["status"] == "success"

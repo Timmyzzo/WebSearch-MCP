@@ -10,6 +10,8 @@ src/grok_search/
 ├─ server.py              stdio 入口
 ├─ lifecycle.py           信号处理与 Windows 父进程监控
 ├─ config.py              环境变量、模型配置和 Tavily Key 轮询
+├─ budget.py              单次工具调用的单调时钟总预算与排队计时
+├─ concurrency.py         可取消的异步并发槽位治理
 ├─ models.py              公共结构化响应模型
 ├─ protocol.py            三态协议、错误对象构造与诊断脱敏
 ├─ prompts.py             Grok 搜索 Prompt
@@ -50,6 +52,8 @@ uv run python -m build
 - Grok/Tavily 组合、合法空结果、旧字段映射、脱敏和并发状态隔离。
 - 深度搜索执行下限、增强预算、时效上下文、来源等级、领域策略、Prompt 注入边界和确定性来源去重。
 - stdio 同一进程内的成功、部分成功、错误、参数校验错误及错误后存活。
+- Grok 进程级最大并发 2、Tavily 每 Key 最大并发 1、不同 Key 并行、排队计入预算、重试受限和取消/异常释放。
+- `web_search` 总预算耗尽、正确终止文案/诊断、超时后 stdio 存活及并发来源/会话隔离。
 
 ## 3. MCP 兼容约束
 
@@ -75,6 +79,8 @@ P0、P1、P2、P3、P4 和 P5 已完成。P2 实现包括：
 
 运行时由进程级共享 `TavilyClient` 持有，三个端点复用同一个 `httpx.AsyncClient`、Key 健康状态和服务熔断器。FastMCP lifespan 在正常关闭时调用 `aclose()` 释放连接池。
 
+Tavily 调度还维护与健康状态分离的 Key 占用计数。Search、Extract、Map 获取同一种 Key 租约；忙碌不改变 `healthy` / `cooldown` / `quota_exhausted` / `invalid`，多个健康 Key 可并行，同一 Key 默认且当前强制最多一个真实请求。租约在成功、失败、取消、总预算超时和熔断切换路径中释放。
+
 可靠性配置为 `TAVILY_KEY_COOLDOWN`、`TAVILY_QUOTA_COOLDOWN`、`TAVILY_SERVICE_FAILURE_THRESHOLD` 和 `TAVILY_SERVICE_COOLDOWN`。
 
 P3 在不提前实现 P4 统一协议的前提下增加了：
@@ -85,6 +91,14 @@ P3 在不提前实现 P4 统一协议的前提下增加了：
 - 按 HTTP 状态和 OpenAI 兼容错误对象分类的重试、提前切换和直接失败。
 - 流式响应完成性校验，以及不会缓存或返回残缺流的结构化最终错误。
 - 单模型真实尝试计数、随机抖动指数退避和 stdio 错误后存活测试。
+
+搜索超时与并发治理在 P2/P3/P4 兼容语义上增加：
+
+- `WEB_SEARCH_TOTAL_TIMEOUT=270` 的调用级单调时钟预算，覆盖 Tavily 补充、Grok 槽位、真实请求、完整流读取、退避和 `Retry-After`。
+- `GROK_MAX_CONCURRENCY=2` 的进程级共享异步限制器；每个真实重试重新获取槽位，120 秒单次读取上限会裁剪到剩余总预算。
+- `TAVILY_PER_KEY_MAX_CONCURRENCY=1` 的共享 Key 租约；健康 Key 忙碌时优先调度其他 Key，全部忙碌时在调用预算内等待。
+- `max_attempts_exhausted`、`non_retryable_error`、`total_budget_exhausted`、`concurrency_queue_timeout` 四类终止诊断，以及配置/实际尝试数、耗时、预算和排队毫秒数。
+- 总预算错误只结束当前调用；Grok 失败而 Tavily 成功仍是 `error`，残缺流仍不得返回、缓存或用于来源提取。
 
 P4 在保留 P2/P3 兼容字段和可靠性语义的前提下增加了：
 
@@ -111,6 +125,8 @@ P5 在不改变工具 Schema、P2/P3 可靠性和 P4 返回协议的前提下增
 
 P6 已完成 Cherry Studio 的工具发现、搜索、来源读取、抓取、映射、结构化错误和错误后存活人工测试；首次搜索曾出现一次客户端超时，上层模型也曾未自动转交 `session_id`，但重试及手动传值后服务端链路正常。Claude Code 和 Codex 的真实人工验收仍未完成。P5/P6 没有实现复杂缓存、持久化答案、RAG、浏览器自动化或新的抓取降级服务。
 
+当前已完成针对 Cherry Studio `-32001` 根因的服务端修复和自动化验证；仍需在 Cherry Studio 将工具外层超时设为 300 秒后完成三路并发、重复搜索、强时效/模糊人物查询和超时后 `get_config_info` 的真实人工复验。300 秒是客户端安全上限，不是性能目标。
+
 ## 5. 提交前检查
 
 ```bash
@@ -123,6 +139,7 @@ git diff --check
 同时确认：
 
 - 新增环境变量已写入中英文 README。
+- Cherry Studio 文档明确 300 秒客户端上限、270 秒服务端预算、120 秒单次读取上限及并发等待/重试关系。
 - 工具 Schema 变更有自动化测试。
 - 错误消息不包含完整 API Key。
 - Cherry Studio、Claude Code 和 Codex 的 stdio 启动方式仍然一致。

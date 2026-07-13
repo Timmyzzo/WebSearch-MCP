@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
 import httpx
 
+from ..budget import RequestBudget
 from ..models import TavilyMapResult, TavilySearchResult
 from ..protocol import sanitize_diagnostic_text
 from ..tavily_reliability import (
+    TavilyConcurrencyTimeout,
     TavilyReliabilityManager,
     TavilyServiceState,
     is_explicitly_invalid,
@@ -73,6 +76,7 @@ class TavilyClient:
         quota_cooldown: float = 3600.0,
         service_failure_threshold: int = 2,
         service_cooldown: float = 30.0,
+        per_key_max_concurrency: int = 1,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.transport = transport
@@ -93,6 +97,7 @@ class TavilyClient:
                 quota_cooldown=quota_cooldown,
                 service_failure_threshold=service_failure_threshold,
                 service_cooldown=service_cooldown,
+                per_key_max_concurrency=per_key_max_concurrency,
             )
 
     async def __aenter__(self) -> TavilyClient:
@@ -134,92 +139,132 @@ class TavilyClient:
         body: dict[str, Any],
         *,
         timeout: float,
+        budget: RequestBudget | None = None,
     ) -> dict[str, Any]:
+        request_budget = budget or RequestBudget(timeout)
         if self.reliability is None:
-            return await self._request_legacy(endpoint, body, timeout=timeout)
+            return await self._request_legacy(
+                endpoint,
+                body,
+                timeout=timeout,
+                budget=request_budget,
+            )
 
         attempted: set[str] = set()
         consistent_errors: list[tuple[str, str]] = []
         last_http_status: int | None = None
         last_upstream_code: str | None = None
         while len(attempted) < len(self.reliability.raw_keys):
-            api_key = await self.reliability.acquire_key(attempted)
+            wait_started = time.monotonic()
+            try:
+                api_key = await self.reliability.acquire_key_slot(
+                    attempted,
+                    timeout=request_budget.remaining(),
+                )
+            except TavilyConcurrencyTimeout as exc:
+                request_budget.record_queue_wait("tavily", time.monotonic() - wait_started)
+                raise self._budget_error(
+                    request_budget,
+                    code="tavily_concurrency_timeout",
+                    message="等待上游并发槽位时预算耗尽",
+                    termination_reason="concurrency_queue_timeout",
+                ) from exc
+            request_budget.record_queue_wait("tavily", time.monotonic() - wait_started)
             if api_key is None:
                 break
             attempted.add(api_key)
             try:
-                response = await (await self._get_client()).post(
-                    endpoint,
-                    headers=self._headers(api_key),
-                    json=body,
-                    timeout=timeout,
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                reason = self._safe_reason(type(exc).__name__)
-                await self.reliability.mark_temporary_failure(
-                    api_key,
-                    network_failure_signature(exc),
-                    reason,
-                )
-                continue
-            except httpx.RequestError as exc:
-                reason = self._safe_reason(type(exc).__name__)
-                await self.reliability.mark_temporary_failure(
-                    api_key,
-                    network_failure_signature(exc),
-                    reason,
-                )
-                continue
+                try:
+                    remaining = request_budget.remaining()
+                    if remaining <= 0:
+                        raise self._budget_error(
+                            request_budget,
+                            code="tavily_total_budget_exhausted",
+                            message="Tavily 请求总时间预算已耗尽",
+                            termination_reason="total_budget_exhausted",
+                        )
+                    async with asyncio.timeout(remaining):
+                        response = await (await self._get_client()).post(
+                            endpoint,
+                            headers=self._headers(api_key),
+                            json=body,
+                            timeout=min(timeout, remaining),
+                        )
+                except TimeoutError as exc:
+                    raise self._budget_error(
+                        request_budget,
+                        code="tavily_total_budget_exhausted",
+                        message="Tavily 请求总时间预算已耗尽",
+                        termination_reason="total_budget_exhausted",
+                    ) from exc
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    reason = self._safe_reason(type(exc).__name__)
+                    await self.reliability.mark_temporary_failure(
+                        api_key,
+                        network_failure_signature(exc),
+                        reason,
+                    )
+                    continue
+                except httpx.RequestError as exc:
+                    reason = self._safe_reason(type(exc).__name__)
+                    await self.reliability.mark_temporary_failure(
+                        api_key,
+                        network_failure_signature(exc),
+                        reason,
+                    )
+                    continue
 
-            if response.is_success:
-                data = self._json_object(response)
-                await self.reliability.mark_success(api_key)
-                return data
+                if response.is_success:
+                    data = self._json_object(response)
+                    await self.reliability.mark_success(api_key)
+                    return data
 
-            data = self._json_or_none(response)
-            error_code, raw_message = response_error_text(data, response.text)
-            retry_after = parse_retry_after(response.headers.get("Retry-After"))
-            status = response.status_code
-            last_http_status = status
-            last_upstream_code = self._safe_upstream_code(error_code)
-            reason = last_upstream_code or f"HTTP {status}"
+                data = self._json_or_none(response)
+                error_code, raw_message = response_error_text(data, response.text)
+                retry_after = parse_retry_after(response.headers.get("Retry-After"))
+                status = response.status_code
+                last_http_status = status
+                last_upstream_code = self._safe_upstream_code(error_code)
+                reason = last_upstream_code or f"HTTP {status}"
 
-            if status == 404:
-                raise self._error(
-                    "tavily_api_configuration_error",
-                    "Tavily API 地址或版本配置错误，请检查 TAVILY_API_URL",
-                    http_status=status,
-                    upstream_code=last_upstream_code,
-                )
-            if status in {401, 403} or is_explicitly_invalid(error_code, raw_message):
-                await self.reliability.mark_invalid(api_key, reason)
-                continue
-            if status in {400, 422}:
-                raise self._error(
-                    "tavily_request_invalid",
-                    f"Tavily 请求参数错误（HTTP {status}）: {reason}",
-                    http_status=status,
-                    upstream_code=last_upstream_code,
-                )
-            if status == 429:
-                await self.reliability.mark_rate_limited(
-                    api_key,
-                    quota_exhausted=is_quota_exhausted(error_code, raw_message),
-                    retry_after=retry_after,
-                    reason=reason,
-                )
-                continue
-            if status == 408 or 500 <= status < 600:
-                await self.reliability.mark_temporary_failure(
-                    api_key,
-                    f"http:{status}",
-                    reason,
-                )
-                continue
+                if status == 404:
+                    raise self._error(
+                        "tavily_api_configuration_error",
+                        "Tavily API 地址或版本配置错误，请检查 TAVILY_API_URL",
+                        http_status=status,
+                        upstream_code=last_upstream_code,
+                    )
+                if status in {401, 403} or is_explicitly_invalid(error_code, raw_message):
+                    await self.reliability.mark_invalid(api_key, reason)
+                    continue
+                if status in {400, 422}:
+                    raise self._error(
+                        "tavily_request_invalid",
+                        f"Tavily 请求参数错误（HTTP {status}）: {reason}",
+                        http_status=status,
+                        upstream_code=last_upstream_code,
+                    )
+                if status == 429:
+                    await self.reliability.mark_rate_limited(
+                        api_key,
+                        quota_exhausted=is_quota_exhausted(error_code, raw_message),
+                        retry_after=retry_after,
+                        reason=reason,
+                    )
+                    continue
+                if status == 408 or 500 <= status < 600:
+                    await self.reliability.mark_temporary_failure(
+                        api_key,
+                        f"http:{status}",
+                        reason,
+                    )
+                    continue
 
-            signature = f"{status}:{error_code or ''}:{reason}"
-            consistent_errors.append((signature, reason))
-            continue
+                signature = f"{status}:{error_code or ''}:{reason}"
+                consistent_errors.append((signature, reason))
+                continue
+            finally:
+                await self._release_key_safely(api_key)
 
         if not self.reliability.raw_keys:
             raise self._error(
@@ -271,6 +316,7 @@ class TavilyClient:
         body: dict[str, Any],
         *,
         timeout: float,
+        budget: RequestBudget,
     ) -> dict[str, Any]:
         api_key = self._legacy_key_provider() if self._legacy_key_provider else None
         if not api_key:
@@ -279,12 +325,28 @@ class TavilyClient:
                 code="tavily_configuration_error",
             )
         try:
-            response = await (await self._get_client()).post(
-                endpoint,
-                headers=self._headers(api_key),
-                json=body,
-                timeout=timeout,
-            )
+            remaining = budget.remaining()
+            if remaining <= 0:
+                raise self._budget_error(
+                    budget,
+                    code="tavily_total_budget_exhausted",
+                    message="Tavily 请求总时间预算已耗尽",
+                    termination_reason="total_budget_exhausted",
+                )
+            async with asyncio.timeout(remaining):
+                response = await (await self._get_client()).post(
+                    endpoint,
+                    headers=self._headers(api_key),
+                    json=body,
+                    timeout=min(timeout, remaining),
+                )
+        except TimeoutError as exc:
+            raise self._budget_error(
+                budget,
+                code="tavily_total_budget_exhausted",
+                message="Tavily 请求总时间预算已耗尽",
+                termination_reason="total_budget_exhausted",
+            ) from exc
         except (httpx.TimeoutException, httpx.RequestError) as exc:
             raise TavilyClientError(
                 f"Tavily 临时网络错误: {type(exc).__name__}",
@@ -317,6 +379,16 @@ class TavilyClient:
         keys = self.reliability.raw_keys if self.reliability else ()
         return sanitize_diagnostic_text(redact_keys(reason, keys), secrets=tuple(keys), limit=200)
 
+    async def _release_key_safely(self, api_key: str) -> None:
+        if self.reliability is None:
+            return
+        release_task = asyncio.create_task(self.reliability.release_key(api_key))
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await release_task
+            raise
+
     def _safe_upstream_code(self, code: str | None) -> str | None:
         if not code:
             return None
@@ -340,6 +412,26 @@ class TavilyClient:
             retryable=retryable,
             http_status=http_status,
             upstream_code=upstream_code,
+        )
+
+    @staticmethod
+    def _budget_error(
+        budget: RequestBudget,
+        *,
+        code: str,
+        message: str,
+        termination_reason: str,
+    ) -> TavilyClientError:
+        return TavilyClientError(
+            message,
+            code=code,
+            retryable=True,
+            diagnostics={
+                "termination_reason": termination_reason,
+                "elapsed_ms": budget.elapsed_ms,
+                "budget_ms": budget.budget_ms,
+                "queue_wait_ms": budget.queue_wait_ms("tavily"),
+            },
         )
 
     async def _reliability_error(
@@ -385,11 +477,12 @@ class TavilyClient:
             )
         return data
 
-    async def extract(self, url: str) -> str | None:
+    async def extract(self, url: str, *, budget: RequestBudget | None = None) -> str | None:
         data = await self._request(
             "/extract",
             {"urls": [url], "format": "markdown"},
             timeout=60.0,
+            budget=budget,
         )
         results = data.get("results", [])
         if not results or not isinstance(results, list) or not isinstance(results[0], dict):
@@ -397,7 +490,13 @@ class TavilyClient:
         content = results[0].get("raw_content", "")
         return content if isinstance(content, str) and content.strip() else None
 
-    async def search(self, query: str, max_results: int = 6) -> list[TavilySearchResult]:
+    async def search(
+        self,
+        query: str,
+        max_results: int = 6,
+        *,
+        budget: RequestBudget | None = None,
+    ) -> list[TavilySearchResult]:
         data = await self._request(
             "/search",
             {
@@ -408,6 +507,7 @@ class TavilyClient:
                 "include_answer": False,
             },
             timeout=90.0,
+            budget=budget,
         )
         return [
             TavilySearchResult(
@@ -428,6 +528,7 @@ class TavilyClient:
         max_breadth: int = 20,
         limit: int = 50,
         timeout: int = 150,
+        budget: RequestBudget | None = None,
     ) -> TavilyMapResult:
         body: dict[str, Any] = {
             "url": url,
@@ -438,7 +539,12 @@ class TavilyClient:
         }
         if instructions:
             body["instructions"] = instructions
-        data = await self._request("/map", body, timeout=float(timeout + 10))
+        data = await self._request(
+            "/map",
+            body,
+            timeout=float(timeout + 10),
+            budget=budget,
+        )
         raw_results = data.get("results", [])
         if not isinstance(raw_results, list):
             raw_results = []
