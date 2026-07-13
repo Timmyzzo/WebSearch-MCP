@@ -13,6 +13,8 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "GROK_PRIMARY_MODEL",
         "GROK_FALLBACK_MODEL",
         "GROK_MODEL_MAX_ATTEMPTS",
+        "GROK_MAX_CONCURRENCY",
+        "WEB_SEARCH_TOTAL_TIMEOUT",
         "GROK_RETRY_MULTIPLIER",
         "GROK_RETRY_MAX_WAIT",
         "TAVILY_API_KEY",
@@ -23,6 +25,7 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "TAVILY_QUOTA_COOLDOWN",
         "TAVILY_SERVICE_FAILURE_THRESHOLD",
         "TAVILY_SERVICE_COOLDOWN",
+        "TAVILY_PER_KEY_MAX_CONCURRENCY",
     ):
         monkeypatch.delenv(name, raising=False)
     config._cached_model = None
@@ -32,6 +35,7 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
         web._GROK_CLIENT = None
         web._GROK_CLIENT_SIGNATURE = None
+        web._GROK_CONCURRENCY_LIMITER = None
         web._TAVILY_CLIENT = None
         web._AVAILABLE_MODELS_CACHE.clear()
         web._SOURCES_CACHE._cache.clear()

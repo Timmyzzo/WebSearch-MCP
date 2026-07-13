@@ -4,7 +4,7 @@ English | [简体中文](../README.md)
 
 A standard MCP web-search server for Cherry Studio, Claude Code, and Codex
 
-**Deep research · one strong model with five retries · Tavily multi-key circuits · stable outcomes**
+**Deep research · active 270-second budget · Grok concurrency 2 · one Tavily request per key**
 
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
@@ -40,7 +40,7 @@ MCP Client --stdio--> WebSearch MCP
 | Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
 | Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
 | Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
-| Explainable reliability | Multi-key Tavily circuits, `Retry-After`, and complete-stream validation. |
+| Explainable reliability | A roughly 270-second server budget, process-wide Grok concurrency of two, one request per Tavily key, circuits, `Retry-After`, and complete-stream validation. |
 | Stable compatibility | Standard MCP stdio, fixed tool schemas, and three stable outcome states. |
 
 Typical uses include retrieving current official documentation, producing answers with traceable sources, extracting pages as Markdown, and reusing the same web tools across MCP clients.
@@ -53,6 +53,7 @@ Typical uses include retrieving current official documentation, producing answer
 - P3 Grok single-model reliability and retries: complete.
 - P4 unified response protocol: complete.
 - P5 search prompt and quality work: complete.
+- Search timeout and concurrency governance: automated implementation complete; Cherry Studio acceptance at a 300-second outer timeout remains.
 - Next: P6 real cross-client acceptance testing.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
@@ -114,6 +115,8 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_API_KEY` | Yes | - | Grok API key. |
 | `GROK_PRIMARY_MODEL` | No | See below | Strong model selected by the user for every Grok search. |
 | `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model. |
+| `GROK_MAX_CONCURRENCY` | No | `2` | Maximum concurrent Grok `/chat/completions` requests in one MCP process; the safety ceiling is two. |
+| `WEB_SEARCH_TOTAL_TIMEOUT` | No | `270` | Total server-side wall-clock budget for one `web_search`, in seconds. |
 | `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
@@ -123,6 +126,7 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `TAVILY_QUOTA_COOLDOWN` | No | `3600` | Default cooldown in seconds for exhausted quotas. |
 | `TAVILY_SERVICE_FAILURE_THRESHOLD` | No | `2` | Distinct keys with the same failure required to open the service circuit; minimum 2. |
 | `TAVILY_SERVICE_COOLDOWN` | No | `30` | Tavily service circuit cooldown in seconds. |
+| `TAVILY_PER_KEY_MAX_CONCURRENCY` | No | `1` | Shared Search/Extract/Map concurrency per key; currently required to be one. |
 | `GROK_DEBUG` | No | `false` | Enables debug logging. |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level. |
 | `GROK_LOG_DIR` | No | `logs` | Log directory. |
@@ -166,6 +170,14 @@ Domain policies include:
 - Niche, ambiguous, or evidence-sparse questions: define concepts, use synonyms or other languages when useful, seek counterexamples, failures, and competing schools, and cross-check key claims with two independent source types where possible.
 
 Queries such as “latest,” “current,” “today,” “current version,” or “still supported” use the actual runtime date and timezone and verify versions, release dates, and update times. Complex answers explain evidence level, disputes, limits, scope, and uncertainty when useful; simple answers are not forced into a long template. The P4 `success`, `partial_success`, `error`, `error_detail`, and compatibility fields remain unchanged.
+
+## Timeout and concurrency governance
+
+Set Cherry Studio's outer MCP tool timeout to 300 seconds. This is a safety ceiling that prevents an early bare `-32001`, not a latency target. Each `web_search` uses `WEB_SEARCH_TOTAL_TIMEOUT=270` by default and actively returns success, partial success, or a structured error within that server-side wall-clock budget, leaving roughly 30 seconds for MCP serialization, scheduling, transport, and client-side variance.
+
+The Grok read limit remains 120 seconds per real attempt, but an attempt receives the smaller of 120 seconds and the remaining total budget. `GROK_MODEL_MAX_ATTEMPTS=5` means at most five real HTTP requests, not five guaranteed requests. Grok-slot waits, Tavily-key waits, HTTP and stream time, exponential backoff, and `Retry-After` all consume the same total budget. A new retry is not started when the remaining budget is no longer reasonable for another attempt.
+
+One MCP process runs at most two Grok HTTP requests by default. Tavily Search, Extract, and Map share key health and occupancy, with at most one real request on each key; distinct healthy keys can run concurrently. Success, failure, cancellation, timeout, and interrupted-stream paths release their slots, and every retry must queue again. Diagnostics distinguish `max_attempts_exhausted`, `non_retryable_error`, `total_budget_exhausted`, and `concurrency_queue_timeout`, with configured/actual attempts, elapsed time, budget, and queue wait.
 
 ## Unified response protocol
 
@@ -230,7 +242,7 @@ Grok succeeds but supplemental Tavily search fails:
 If Grok ultimately fails, successful Tavily results never become a fake Grok answer:
 
 ```json
-{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"The Grok model failed after exhausting retries","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"switched_model":false}},"partial":false}
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"The Grok model failed after exhausting the maximum attempts","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"termination_reason":"max_attempts_exhausted","configured_max_attempts":5,"actual_attempts":5,"elapsed_ms":120000,"budget_ms":270000,"queue_wait_ms":0}},"partial":false}
 ```
 
 Other tool examples:
@@ -244,9 +256,11 @@ Other tool examples:
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"The search plan is incomplete","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## One strong Grok model with five retries
+## One strong Grok model with up to five real attempts
 
 Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay account-pool failures are retried with jittered exponential backoff, up to five real requests by default.
+
+Retries cannot exceed `WEB_SEARCH_TOTAL_TIMEOUT` or bypass `GROK_MAX_CONCURRENCY`. Authentication, request, missing-model, and permission errors say that execution stopped early because the failure was not retryable. Only a call that really reaches the configured limit reports exhausted maximum attempts. Total-budget and concurrency-queue exhaustion have distinct structured reasons.
 
 Model-not-found and model-permission errors stop immediately; temporary model unavailability retries the same model. Explicit 400/422 request errors and 401/403 or explicit API-key authentication failures also stop immediately.
 
@@ -269,6 +283,8 @@ Healthy keys are selected fairly in round-robin order, and Search, Extract, and 
 - `quota_exhausted`: unavailable for a longer quota cooldown.
 - `invalid`: revoked or unauthorized and disabled for the process lifetime.
 
+Busy is transient occupancy, separate from key health, and is never reclassified as cooldown, quota exhaustion, or invalidity. A request prefers another healthy idle key; if every healthy key is busy, it waits for the earliest slot within the current tool budget.
+
 HTTP 401/403 disables the current key. HTTP 429 is classified using Tavily error data, response text, and `Retry-After`. HTTP 400/422 returns immediately without consuming every key, while HTTP 404 reports an API URL/version configuration problem. Matching 5xx or network failures from distinct keys open a service-level circuit breaker; after cooldown, only one half-open probe is allowed.
 
 When every key is unavailable, `web_fetch` and `web_map` return `status="error"`, `tavily_all_keys_unavailable`, and masked key states. `web_search` preserves any Grok answer with `status="partial_success"`, `partial=true`, and `tavily_error`. Only the current tool call ends; the MCP process remains alive.
@@ -279,6 +295,7 @@ When every key is unavailable, `web_fetch` and `web_map` return `status="error"`
 - If search works but fetch or map fails, configure Tavily and confirm that it is enabled.
 - For corporate certificate errors, add `--native-tls` before `--from` in the `uvx` arguments.
 - Configuration diagnostics mask API keys. Never commit real keys or paste them into issues and screenshots.
+- If Cherry Studio still reports `-32001`, set its MCP tool timeout to 300 seconds and keep the server budget below it; the default is 270 seconds. The 300-second value is a safety ceiling, not a performance goal.
 
 ## Development
 

@@ -13,7 +13,7 @@
 
 项目优先级依次为：可用性、答案准确性与前沿性、故障可解释性、跨客户端兼容性、性能与维护性。
 
-当前进度：P0、P1、P2、P3、P4、P5 已完成；下一阶段为 P6 跨客户端真实人工验收。
+当前进度：P0、P1、P2、P3、P4、P5 及搜索超时/并发治理自动化实现已完成；下一阶段为 P6 跨客户端真实人工验收，其中 Cherry Studio 仍需在 300 秒工具外层超时下复验并发和长搜索。
 
 ## 2. 已确认的产品决策
 
@@ -22,6 +22,8 @@
 - [x] Tavily 多 Key 采用轮询作为正常调度方式。
 - [x] Tavily Key 出错时按状态码和响应内容分类，采用不同熔断策略。
 - [x] Grok 使用用户配置的单一强模型；可恢复故障默认最多真实调用 5 次，不自动降级模型。
+- [x] 单次 `web_search` 默认使用约 270 秒服务端总墙钟预算，在客户端 300 秒外层超时前主动返回；等待、请求、流读取、退避和重试都服从同一预算。
+- [x] 同一 MCP 进程最多并发 2 个 Grok HTTP 请求；Tavily Search、Extract、Map 每个 Key 合计最多并发 1 个真实请求。
 - [x] MCP 必须兼容 Cherry Studio、Claude Code 和 Codex，核心能力不得依赖某个客户端的私有配置。
 - [ ] 当前阶段不调整敏感日志策略，先保证功能稳定和搜索质量。
 - [x] 后续代码提交目标仓库为 `https://github.com/Timmyzzo/WebSearch-MCP`。
@@ -54,6 +56,7 @@
 - [x] 正常请求按 Key 轮询，避免单个 Key 长期承担全部流量。
 - [x] 日志和错误消息只显示 Key 指纹，例如前后各 4 位，不输出完整 Key。
 - [x] Key 状态在 Search、Extract、Map 三类调用之间共享。
+- [x] Key 占用状态也在三个端点之间共享；忙碌 Key 不改变健康分类，不同健康 Key 可以并发。
 
 ### 4.2 错误分类
 
@@ -128,16 +131,28 @@
   "status": "error",
   "error": {
     "code": "grok_primary_failed",
-    "message": "Grok 模型调用失败，已用尽当前模型的重试次数",
+    "message": "Grok 模型调用失败，已用尽最大尝试次数",
     "primary_model": "...",
     "fallback_model": null,
     "attempts": 5,
-    "last_error_type": "upstream_unavailable"
+    "last_error_type": "upstream_unavailable",
+    "termination_reason": "max_attempts_exhausted",
+    "configured_max_attempts": 5,
+    "actual_attempts": 5
   }
 }
 ```
 
 不得伪装成空搜索结果，也不得返回看似成功但 `content` 为空的响应。
+
+### 5.5 总预算、并发和终止诊断
+
+- [x] `WEB_SEARCH_TOTAL_TIMEOUT` 默认 270 秒；Cherry Studio 建议 300 秒工具外层超时，预留约 30 秒传输和调度余量。
+- [x] Grok 单次读取上限 120 秒，但实际超时裁剪到剩余总预算；`GROK_MODEL_MAX_ATTEMPTS=5` 仍是最多 5 次真实请求。
+- [x] `GROK_MAX_CONCURRENCY=2` 在进程级共享，每次重试重新排队；成功、失败、取消、超时和流中断都释放槽位。
+- [x] `TAVILY_PER_KEY_MAX_CONCURRENCY=1` 与 P2 轮询、健康状态、Key/服务熔断和半开探测共同工作。
+- [x] 等待 Grok/Tavily 槽位计入调用总预算；`Retry-After` 和退避只有在仍能容纳合理新尝试时才执行。
+- [x] 终止原因区分最大尝试次数耗尽、不可重试错误提前停止、总预算耗尽和并发排队耗尽，并输出脱敏尝试/耗时/预算/排队诊断。
 
 ## 6. 搜索质量目标
 
@@ -295,14 +310,18 @@ P4 的兼容实现约定：
 - [x] Cherry Studio 已完成工具发现、搜索、来源读取、抓取、映射、结构化错误和错误后存活测试。
 - [ ] Claude Code 和 Codex 仍需完成真实人工验收。
 - [ ] 检查工具 Schema、错误显示、长内容和超时行为。
+- [x] 服务端已实现 270 秒主动预算、Grok/Tavily 并发治理和结构化超时；Cherry Studio 300 秒真实人工复验仍待执行。
 - [x] 编写三套用户配置示例。
 
 ### P7：测试覆盖
 
 - [x] Tavily Key 轮询、失效、限流、服务故障和全 Key 熔断测试。
-- [x] Grok 单模型五次重试、立即失败分类和尝试次数测试。
+- [x] Grok 单模型最多五次真实尝试、立即失败分类和尝试次数测试。
 - [x] Tavily Search、Extract、Map 的模拟集成测试。
-- [ ] 流式响应、来源提取、缓存 TTL 和工具 Schema 测试。
+- [x] 流完整性、来源提取、固定工具 Schema、并发响应隔离和错误后 stdio 存活测试。
+- [x] Grok 最大并发 2、重试受限、排队预算、取消/异常/流中断释放和终止文案测试。
+- [x] Tavily 每 Key 最大并发 1、不同 Key 并行、忙碌状态、排队预算及取消/异常/熔断释放测试。
+- [ ] 缓存 TTL 测试。
 
 ## 11. 暂缓事项
 

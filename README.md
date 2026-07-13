@@ -4,7 +4,7 @@
 
 面向 Cherry Studio、Claude Code 与 Codex 的标准 MCP 网络搜索服务
 
-**深度检索 · 单强模型五次重试 · Tavily 多 Key 熔断 · 稳定三态协议**
+**深度检索 · 270 秒主动预算 · Grok 并发 2 · Tavily 每 Key 并发 1**
 
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -40,7 +40,7 @@ MCP Client ──stdio──► WebSearch MCP
 | 深度优先 | 每次搜索至少覆盖 5 个独立视角并深挖其中 2 个方向，通常形成 7–12 次检索动作。 |
 | 强模型优先 | 始终使用用户配置的单一最强 Grok 模型；临时错误默认最多真实调用 5 次。 |
 | 证据融合 | Tavily 候选证据会进入 Grok 的同一次核验与最终综合，而不是只在事后缓存。 |
-| 可解释可靠性 | Tavily 多 Key、Key/服务级熔断、`Retry-After`、Grok 流完整性校验。 |
+| 可解释可靠性 | 约 270 秒服务端总预算、Grok 进程级并发 2、Tavily 每 Key 并发 1、熔断、`Retry-After` 与完整流校验。 |
 | 稳定兼容 | 标准 MCP stdio、固定工具 Schema、统一 `success` / `partial_success` / `error`。 |
 
 适合以下场景：
@@ -58,6 +58,7 @@ MCP Client ──stdio──► WebSearch MCP
 - P3 Grok 单强模型与重试：已完成。
 - P4 统一返回协议：已完成。
 - P5 搜索 Prompt 与搜索质量重构：已完成。
+- 搜索超时与并发治理：已完成自动化实现；等待 Cherry Studio 300 秒外层超时人工复验。
 - 下一阶段：P6 跨客户端真实人工验收。
 
 完整需求与验收标准见 [开发路线文档](./docs/DEVELOPMENT_ROADMAP.md)。
@@ -124,6 +125,8 @@ switch_model
 | `GROK_API_KEY` | 是 | - | Grok API Key。 |
 | `GROK_PRIMARY_MODEL` | 否 | 见下文 | 每次搜索使用的强模型名称，由用户自行填写。 |
 | `GROK_MODEL_MAX_ATTEMPTS` | 否 | `5` | 当前模型对可恢复故障的最多真实请求次数，必须为正整数。 |
+| `GROK_MAX_CONCURRENCY` | 否 | `2` | 同一 MCP 进程最多同时发出的 Grok `/chat/completions` 请求数；安全上限为 2。 |
+| `WEB_SEARCH_TOTAL_TIMEOUT` | 否 | `270` | 单次 `web_search` 的服务端总墙钟预算，单位秒。 |
 | `GROK_MODEL` | 否 | `grok-4-fast` | 兼容配置；未设置非空 `GROK_PRIMARY_MODEL` 时映射为主模型。 |
 | `TAVILY_API_KEY` | 否 | - | 单个 Tavily Key。 |
 | `TAVILY_API_KEYS` | 否 | - | 多个 Tavily Key，支持逗号、分号或换行分隔，优先于单 Key。 |
@@ -133,6 +136,7 @@ switch_model
 | `TAVILY_QUOTA_COOLDOWN` | 否 | `3600` | 额度耗尽 Key 的默认冷却秒数。 |
 | `TAVILY_SERVICE_FAILURE_THRESHOLD` | 否 | `2` | 触发服务级熔断所需的不同 Key 同类故障数，最小为 2。 |
 | `TAVILY_SERVICE_COOLDOWN` | 否 | `30` | Tavily 服务级熔断冷却秒数。 |
+| `TAVILY_PER_KEY_MAX_CONCURRENCY` | 否 | `1` | Search、Extract、Map 共享的每 Key 真实请求并发上限；当前必须为 1。 |
 | `GROK_DEBUG` | 否 | `false` | 是否记录调试信息。 |
 | `GROK_LOG_LEVEL` | 否 | `INFO` | 日志级别。 |
 | `GROK_LOG_DIR` | 否 | `logs` | 日志目录。 |
@@ -176,6 +180,14 @@ switch_model
 - 小众、模糊或证据稀缺问题：先定义概念，必要时使用同义词或多语言检索，主动寻找反例、失败案例和不同学派，并尝试用两类独立来源交叉验证。
 
 “最新、当前、今天、现版本、仍然支持”等查询会使用运行时实际日期和时区，核对版本、发布日期和资料更新时间。复杂答案按需要说明证据等级、争议、限制、适用范围和不确定性；简单答案不会被强制套用冗长模板。P4 的 `success`、`partial_success`、`error`、`error_detail` 和全部兼容字段保持不变。
+
+## 超时与并发治理
+
+Cherry Studio 建议把 MCP 工具外层超时设置为 300 秒；这是避免客户端过早产生 `-32001` 的安全上限，不是性能目标。服务端单次 `web_search` 默认使用 `WEB_SEARCH_TOTAL_TIMEOUT=270` 的总墙钟预算，并在该预算内主动返回成功、部分成功或结构化错误，为 MCP 序列化、进程调度和客户端传输预留约 30 秒。
+
+Grok 单次读取上限仍为 120 秒，但每次真实尝试的实际可用时间会缩短为“120 秒与当前剩余总预算中的较小值”。`GROK_MODEL_MAX_ATTEMPTS=5` 只表示最多 5 次真实 HTTP 请求，不保证一定执行 5 次：等待 Grok 槽位、Tavily Key 槽位、HTTP 传输、流读取、指数退避和 `Retry-After` 都消耗同一个总预算；剩余预算不足以容纳合理的新尝试时会提前停止。
+
+同一 MCP 进程默认最多同时执行 2 个 Grok HTTP 请求。Tavily Search、Extract、Map 共用 Key 健康与占用状态，每个 Key 同时最多 1 个真实请求；多个健康 Key 可以各承担一个并发请求。所有槽位在成功、错误、取消、超时和流中断路径中释放，重试也必须重新排队。预算终止诊断会区分 `max_attempts_exhausted`、`non_retryable_error`、`total_budget_exhausted` 和 `concurrency_queue_timeout`，并报告配置/实际尝试数、耗时、预算与排队时间。
 
 ## 统一返回协议
 
@@ -240,7 +252,7 @@ Grok 成功但 Tavily 补充失败：
 Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
 
 ```json
-{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"Grok 模型调用失败，已用尽当前模型的重试次数","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"switched_model":false}},"partial":false}
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"Grok 模型调用失败，已用尽最大尝试次数","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"termination_reason":"max_attempts_exhausted","configured_max_attempts":5,"actual_attempts":5,"elapsed_ms":120000,"budget_ms":270000,"queue_wait_ms":0}},"partial":false}
 ```
 
 其他工具示例：
@@ -254,9 +266,11 @@ Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"搜索计划尚未完成，可继续提交剩余规划阶段","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## Grok 单强模型与五次重试
+## Grok 单强模型与最多五次真实尝试
 
 每次调用只使用用户配置的当前模型。408、429、5xx、连接失败、连接/读取超时、完整内容产生前或流式传输中的中断，以及可识别的中转站“上游账号不可用/死号/账号池不可用”错误，会按带随机抖动的指数退避重试，默认最多执行 5 次真实请求。
+
+重试不会突破 `WEB_SEARCH_TOTAL_TIMEOUT`，也不会绕过 `GROK_MAX_CONCURRENCY`。认证、参数、模型不存在和无权限错误会以“因不可重试错误提前停止”结束；只有确实达到配置上限才报告“已用尽最大尝试次数”。总预算或并发排队耗尽使用独立终止原因和结构化诊断。
 
 模型不存在或无权限会立即停止；模型暂时不可用会继续重试当前模型。明确的 400/422 参数错误和 401/403/API Key 认证失败也会立即停止。错误分类同时检查 HTTP 状态、OpenAI 兼容错误对象、错误码、错误类型和正文语义。
 
@@ -279,6 +293,8 @@ TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
 - `quota_exhausted`：额度耗尽，使用较长冷却时间。
 - `invalid`：Key 无效或被撤销，本进程内不再使用。
 
+Key 的“忙碌”是独立于上述健康状态的瞬时占用信息，不会被误判为冷却、额度耗尽或失效。同一 Key 忙碌时会优先选择其他健康空闲 Key；如果所有健康 Key 都忙碌，则在当前工具预算内等待最早可用槽位。
+
 401/403 会使当前 Key 失效；429 会根据错误码、正文和 `Retry-After` 区分临时限流与额度耗尽；400/422 直接返回参数错误；404 提示检查 `TAVILY_API_URL`。多个不同 Key 出现相同 5xx 或网络错误时会触发服务级熔断，冷却后仅允许一次半开探测。
 
 所有 Key 不可用时，`web_fetch` 和 `web_map` 返回 `status="error"`、`tavily_all_keys_unavailable` 及脱敏状态摘要。`web_search` 会保留已有 Grok 结果，返回 `status="partial_success"`，同时设置 `partial=true` 并保留 `tavily_error`。该错误只终止当前工具调用，不会退出 MCP 进程。
@@ -300,6 +316,10 @@ TAVILY_API_KEYS=tvly-key-1,tvly-key-2,tvly-key-3
 ### 是否会泄露 API Key
 
 配置诊断只返回脱敏 Key。不要把真实 Key 写入仓库、Issue、日志截图或客户端共享配置。
+
+### Cherry Studio 仍显示 `-32001: Request timed out`
+
+把 Cherry Studio 的 MCP 工具超时设置为 300 秒，并确认服务端没有把 `WEB_SEARCH_TOTAL_TIMEOUT` 配置为 300 秒或更高。默认 270 秒会先返回业务层结构化超时；300 秒只是客户端安全上限。
 
 ## 本地开发
 

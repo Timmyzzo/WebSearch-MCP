@@ -72,6 +72,28 @@ class Config:
         return value
 
     @property
+    def grok_max_concurrency(self) -> int:
+        raw = os.getenv("GROK_MAX_CONCURRENCY", "2").strip()
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError("GROK_MAX_CONCURRENCY 必须是 1 或 2") from exc
+        if value not in {1, 2}:
+            raise ValueError("GROK_MAX_CONCURRENCY 必须是 1 或 2")
+        return value
+
+    @property
+    def web_search_total_timeout(self) -> float:
+        raw = os.getenv("WEB_SEARCH_TOTAL_TIMEOUT", "270").strip()
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("WEB_SEARCH_TOTAL_TIMEOUT 必须是大于 0 的秒数") from exc
+        if value <= 0:
+            raise ValueError("WEB_SEARCH_TOTAL_TIMEOUT 必须大于 0")
+        return value
+
+    @property
     def retry_multiplier(self) -> float:
         return float(os.getenv("GROK_RETRY_MULTIPLIER", "1"))
 
@@ -140,6 +162,17 @@ class Config:
     @property
     def tavily_service_cooldown(self) -> float:
         return max(0.0, float(os.getenv("TAVILY_SERVICE_COOLDOWN", "30")))
+
+    @property
+    def tavily_per_key_max_concurrency(self) -> int:
+        raw = os.getenv("TAVILY_PER_KEY_MAX_CONCURRENCY", "1").strip()
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError("TAVILY_PER_KEY_MAX_CONCURRENCY 当前必须为 1") from exc
+        if value != 1:
+            raise ValueError("TAVILY_PER_KEY_MAX_CONCURRENCY 当前必须为 1")
+        return value
 
     def next_tavily_api_key(self) -> str | None:
         keys = self.tavily_api_keys
@@ -275,6 +308,8 @@ class Config:
             "GROK_PRIMARY_MODEL": self.grok_primary_model,
             "GROK_FALLBACK_MODEL": "已弃用（单模型模式）",
             "GROK_MODEL_MAX_ATTEMPTS": max_attempts,
+            "GROK_MAX_CONCURRENCY": self.grok_max_concurrency,
+            "WEB_SEARCH_TOTAL_TIMEOUT": self.web_search_total_timeout,
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,
@@ -286,6 +321,7 @@ class Config:
             "TAVILY_QUOTA_COOLDOWN": self.tavily_quota_cooldown,
             "TAVILY_SERVICE_FAILURE_THRESHOLD": self.tavily_service_failure_threshold,
             "TAVILY_SERVICE_COOLDOWN": self.tavily_service_cooldown,
+            "TAVILY_PER_KEY_MAX_CONCURRENCY": self.tavily_per_key_max_concurrency,
             "config_status": config_status,
         }
 

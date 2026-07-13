@@ -34,7 +34,7 @@ class FakeClosableGrokClient:
 
 
 class FakeTavilyClient:
-    async def search(self, query, max_results=6):
+    async def search(self, query, max_results=6, **kwargs):
         return [
             TavilySearchResult(
                 title="Supplement",
@@ -44,7 +44,7 @@ class FakeTavilyClient:
             )
         ]
 
-    async def extract(self, url):
+    async def extract(self, url, **kwargs):
         return "# Extracted"
 
     async def map(self, **kwargs):
@@ -62,10 +62,10 @@ class UnavailableTavilyClient:
         service={"state": "closed", "retry_after_seconds": 0},
     )
 
-    async def search(self, query, max_results=6):
+    async def search(self, query, max_results=6, **kwargs):
         raise self.error
 
-    async def extract(self, url):
+    async def extract(self, url, **kwargs):
         raise self.error
 
     async def map(self, **kwargs):

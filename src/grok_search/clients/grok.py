@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from ..budget import RequestBudget
+from ..concurrency import AsyncConcurrencyLimiter, ConcurrencySlotTimeout
 from ..config import config
 from ..logger import log_info
 from ..prompts import build_search_messages, current_time_context
@@ -63,6 +65,9 @@ _AUTH_PATTERNS = (
     "密钥无效",
 )
 
+_SINGLE_ATTEMPT_READ_TIMEOUT = 120.0
+_MIN_NEW_ATTEMPT_BUDGET = 1.0
+
 
 def get_local_time_info() -> str:
     context = current_time_context()
@@ -104,6 +109,9 @@ class GrokClientError(RuntimeError):
         fallback_attempts: int,
         last_failure: _AttemptFailure,
         switched_model: bool,
+        termination_reason: str | None = None,
+        configured_max_attempts: int | None = None,
+        budget: RequestBudget | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -117,7 +125,21 @@ class GrokClientError(RuntimeError):
         self.last_http_status = last_failure.http_status
         self.last_upstream_code = last_failure.upstream_code
         self.switched_model = switched_model
-        self.retryable = last_failure.action in {"retry", "switch"}
+        self.termination_reason = termination_reason or (
+            "non_retryable_error"
+            if last_failure.action == "fatal"
+            else "max_attempts_exhausted"
+        )
+        self.configured_max_attempts = configured_max_attempts or self.total_attempts
+        self.actual_attempts = self.total_attempts
+        self.elapsed_ms = budget.elapsed_ms if budget is not None else 0
+        self.budget_ms = budget.budget_ms if budget is not None else 0
+        self.queue_wait_ms = budget.queue_wait_ms("grok") if budget is not None else 0
+        self.retryable = self.termination_reason in {
+            "max_attempts_exhausted",
+            "total_budget_exhausted",
+            "concurrency_queue_timeout",
+        } or last_failure.action in {"retry", "switch"}
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -134,7 +156,23 @@ class GrokClientError(RuntimeError):
             "last_http_status": self.last_http_status,
             "last_upstream_code": self.last_upstream_code,
             "switched_model": self.switched_model,
-            "diagnostics": {},
+            "termination_reason": self.termination_reason,
+            "configured_max_attempts": self.configured_max_attempts,
+            "actual_attempts": self.actual_attempts,
+            "elapsed_ms": self.elapsed_ms,
+            "budget_ms": self.budget_ms,
+            "queue_wait_ms": self.queue_wait_ms,
+            "diagnostics": {
+                "termination_reason": self.termination_reason,
+                "configured_max_attempts": self.configured_max_attempts,
+                "actual_attempts": self.actual_attempts,
+                "elapsed_ms": self.elapsed_ms,
+                "budget_ms": self.budget_ms,
+                "queue_wait_ms": self.queue_wait_ms,
+                "last_error_type": self.last_error_type,
+                "last_http_status": self.last_http_status,
+                "last_upstream_code": self.last_upstream_code,
+            },
         }
 
 
@@ -149,6 +187,7 @@ class GrokClient:
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random_source: Callable[[], float] = random.random,
+        concurrency_limiter: AsyncConcurrencyLimiter | None = None,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
@@ -160,6 +199,9 @@ class GrokClient:
         self._closed = False
         self._sleep = sleep
         self._random = random_source
+        self._concurrency_limiter = concurrency_limiter or AsyncConcurrencyLimiter(
+            config.grok_max_concurrency
+        )
 
     @property
     def headers(self) -> dict[str, str]:
@@ -226,6 +268,7 @@ class GrokClient:
         fallback_model: str | None = None,
         max_attempts: int | None = None,
         supplemental_sources: list[dict[str, str]] | None = None,
+        budget: RequestBudget | None = None,
     ) -> str:
         primary = primary_model or self.model
         _ = fallback_model  # Deprecated compatibility argument; single-model mode ignores it.
@@ -236,6 +279,7 @@ class GrokClient:
         )
         if attempts_limit < 1:
             raise ValueError("每个模型的最大尝试次数必须大于或等于 1")
+        request_budget = budget or RequestBudget(config.web_search_total_timeout)
         messages = build_search_messages(
             query,
             platform,
@@ -246,40 +290,157 @@ class GrokClient:
         counts = {primary: 0}
         last_failure = _AttemptFailure("upstream_unavailable", action="retry")
         for attempt_number in range(1, attempts_limit + 1):
-            counts[primary] += 1
+            if request_budget.expired():
+                last_failure = _AttemptFailure("total_budget_exhausted", action="retry")
+                raise self._final_error(
+                    primary,
+                    counts,
+                    last_failure,
+                    termination_reason="total_budget_exhausted",
+                    configured_max_attempts=attempts_limit,
+                    budget=request_budget,
+                )
+            if (
+                attempt_number > 1
+                and request_budget.remaining() < _MIN_NEW_ATTEMPT_BUDGET
+            ):
+                last_failure = _AttemptFailure("total_budget_exhausted", action="retry")
+                raise self._final_error(
+                    primary,
+                    counts,
+                    last_failure,
+                    termination_reason="total_budget_exhausted",
+                    configured_max_attempts=attempts_limit,
+                    budget=request_budget,
+                )
             payload = {"model": primary, "messages": messages, "stream": True}
             try:
-                result = await self._execute_stream(payload)
+                async with self._concurrency_limiter.slot(
+                    request_budget,
+                    service="grok",
+                ):
+                    remaining = request_budget.remaining()
+                    if remaining <= 0:
+                        raise _AttemptFailure(
+                            "total_budget_exhausted",
+                            action="retry",
+                        )
+                    counts[primary] += 1
+                    try:
+                        async with asyncio.timeout(remaining):
+                            result = await self._execute_stream(
+                                payload,
+                                timeout=remaining,
+                            )
+                    except TimeoutError as exc:
+                        raise _AttemptFailure(
+                            "total_budget_exhausted",
+                            action="retry",
+                        ) from exc
                 await log_info(ctx, f"Grok model {primary} completed", config.debug_enabled)
                 return result
+            except ConcurrencySlotTimeout as exc:
+                last_failure = _AttemptFailure("concurrency_queue_timeout", action="retry")
+                raise self._final_error(
+                    primary,
+                    counts,
+                    last_failure,
+                    termination_reason="concurrency_queue_timeout",
+                    configured_max_attempts=attempts_limit,
+                    budget=request_budget,
+                ) from exc
             except _AttemptFailure as exc:
                 last_failure = exc
                 if exc.action == "fatal":
-                    raise self._final_error(primary, counts, exc) from exc
+                    raise self._final_error(
+                        primary,
+                        counts,
+                        exc,
+                        termination_reason="non_retryable_error",
+                        configured_max_attempts=attempts_limit,
+                        budget=request_budget,
+                    ) from exc
+                if exc.error_type == "total_budget_exhausted":
+                    raise self._final_error(
+                        primary,
+                        counts,
+                        exc,
+                        termination_reason="total_budget_exhausted",
+                        configured_max_attempts=attempts_limit,
+                        budget=request_budget,
+                    ) from exc
                 if attempt_number >= attempts_limit:
                     break
-                await self._sleep(self._retry_delay(attempt_number, exc.retry_after))
+                delay = self._retry_delay(attempt_number, exc.retry_after)
+                if request_budget.remaining() < delay + _MIN_NEW_ATTEMPT_BUDGET:
+                    raise self._final_error(
+                        primary,
+                        counts,
+                        exc,
+                        termination_reason="total_budget_exhausted",
+                        configured_max_attempts=attempts_limit,
+                        budget=request_budget,
+                    ) from exc
+                try:
+                    async with asyncio.timeout(request_budget.remaining()):
+                        await self._sleep(delay)
+                except TimeoutError as timeout_exc:
+                    raise self._final_error(
+                        primary,
+                        counts,
+                        exc,
+                        termination_reason="total_budget_exhausted",
+                        configured_max_attempts=attempts_limit,
+                        budget=request_budget,
+                    ) from timeout_exc
             except Exception as exc:
                 last_failure = _AttemptFailure("client_error", action="fatal")
-                raise self._final_error(primary, counts, last_failure) from exc
+                raise self._final_error(
+                    primary,
+                    counts,
+                    last_failure,
+                    termination_reason="non_retryable_error",
+                    configured_max_attempts=attempts_limit,
+                    budget=request_budget,
+                ) from exc
 
-        raise self._final_error(primary, counts, last_failure)
+        raise self._final_error(
+            primary,
+            counts,
+            last_failure,
+            termination_reason="max_attempts_exhausted",
+            configured_max_attempts=attempts_limit,
+            budget=request_budget,
+        )
 
     def _final_error(
         self,
         primary: str,
         counts: dict[str, int],
         failure: _AttemptFailure,
+        *,
+        termination_reason: str,
+        configured_max_attempts: int,
+        budget: RequestBudget,
     ) -> GrokClientError:
-        if failure.error_type == "authentication_error":
+        if termination_reason == "concurrency_queue_timeout":
+            code = "grok_concurrency_timeout"
+            message = "Grok 模型调用失败，等待上游并发槽位时预算耗尽"
+        elif termination_reason == "total_budget_exhausted":
+            code = "grok_total_budget_exhausted"
+            message = "Grok 模型调用失败，搜索总时间预算已耗尽"
+        elif failure.error_type == "authentication_error":
             code = "grok_authentication_error"
-            message = "Grok API 认证失败，请检查 GROK_API_KEY"
+            message = "Grok API 认证失败，请检查 GROK_API_KEY；因不可重试错误提前停止"
         elif failure.error_type == "request_invalid":
             code = "grok_request_invalid"
-            message = "Grok 请求参数无效，已停止重复请求"
+            message = "Grok 请求参数无效，因不可重试错误提前停止"
+        elif termination_reason == "non_retryable_error":
+            code = "grok_primary_failed"
+            message = "Grok 模型调用失败，因不可重试错误提前停止"
         else:
             code = "grok_primary_failed"
-            message = "Grok 模型调用失败，已用尽当前模型的重试次数"
+            message = "Grok 模型调用失败，已用尽最大尝试次数"
         return GrokClientError(
             code=code,
             message=message,
@@ -289,6 +450,9 @@ class GrokClient:
             fallback_attempts=0,
             last_failure=failure,
             switched_model=False,
+            termination_reason=termination_reason,
+            configured_max_attempts=configured_max_attempts,
+            budget=budget,
         )
 
     def _retry_delay(self, attempt_number: int, retry_after: float | None) -> float:
@@ -299,7 +463,7 @@ class GrokClient:
         delay = base * (0.5 + 0.5 * min(1.0, max(0.0, self._random())))
         return max(delay, retry_after or 0.0)
 
-    async def _execute_stream(self, payload: dict[str, Any]) -> str:
+    async def _execute_stream(self, payload: dict[str, Any], *, timeout: float) -> str:
         try:
             client = await self._get_client()
             async with client.stream(
@@ -307,6 +471,12 @@ class GrokClient:
                 "/chat/completions",
                 headers=self.headers,
                 json=payload,
+                timeout=httpx.Timeout(
+                    connect=min(6.0, timeout),
+                    read=min(_SINGLE_ATTEMPT_READ_TIMEOUT, timeout),
+                    write=min(10.0, timeout),
+                    pool=timeout,
+                ),
             ) as response:
                 if not response.is_success:
                     await response.aread()

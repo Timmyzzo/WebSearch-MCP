@@ -56,6 +56,12 @@ def error_from_grok(detail: GrokErrorDetail) -> ErrorDetail:
         "total_attempts": detail.total_attempts,
         "last_error_type": detail.last_error_type,
         "switched_model": detail.switched_model,
+        "termination_reason": detail.termination_reason,
+        "configured_max_attempts": detail.configured_max_attempts,
+        "actual_attempts": detail.actual_attempts,
+        "elapsed_ms": detail.elapsed_ms,
+        "budget_ms": detail.budget_ms,
+        "queue_wait_ms": detail.queue_wait_ms,
     }
     diagnostics.update(detail.diagnostics)
     return make_error_detail(

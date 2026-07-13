@@ -57,7 +57,7 @@ class GrokFails:
 
 
 class TavilyResults:
-    async def search(self, query, max_results=6):
+    async def search(self, query, max_results=6, **kwargs):
         return [
             TavilySearchResult(
                 title="Docs",
@@ -67,7 +67,7 @@ class TavilyResults:
             )
         ]
 
-    async def extract(self, url):
+    async def extract(self, url, **kwargs):
         return "# Content"
 
     async def map(self, **kwargs):
@@ -90,10 +90,10 @@ class TavilyFails:
             service={"state": "open", "retry_after_seconds": 30},
         )
 
-    async def search(self, query, max_results=6):
+    async def search(self, query, max_results=6, **kwargs):
         raise self.error
 
-    async def extract(self, url):
+    async def extract(self, url, **kwargs):
         raise self.error
 
     async def map(self, **kwargs):
@@ -246,7 +246,7 @@ async def test_fetch_and_map_distinguish_success_empty_partial_and_upstream_erro
     assert mapped.results
 
     class EmptyTavily(TavilyResults):
-        async def extract(self, url):
+        async def extract(self, url, **kwargs):
             return None
 
         async def map(self, **kwargs):

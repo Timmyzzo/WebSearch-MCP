@@ -377,6 +377,7 @@ async def test_partial_stream_interruption_is_never_returned_as_success():
     assert caught.value.last_error_type == "stream_interrupted_after_content"
     assert "partial secret" not in str(caught.value.to_dict())
     assert partial.closed is True
+    assert client._concurrency_limiter.active == 0
 
 
 async def test_finish_reason_marks_content_complete_before_socket_close():
