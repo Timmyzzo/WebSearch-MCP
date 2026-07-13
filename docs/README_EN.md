@@ -6,12 +6,22 @@ English | [简体中文](../README.md)
 
 A standard MCP web-search server for Cherry Studio, Claude Code, and Codex
 
+**Deep research · one strong model with five retries · Tavily multi-key circuits · stable outcomes**
+
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP stdio](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
 
 </div>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#why-websearch-mcp">Highlights</a> ·
+  <a href="#tool-overview">Tools</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="./CLIENT_SETUP_EN.md">Client setup</a>
+</p>
 
 ## What is WebSearch MCP?
 
@@ -25,6 +35,16 @@ MCP Client --stdio--> WebSearch MCP
                        `-- web_map    --> Tavily Map
 ```
 
+## Why WebSearch MCP
+
+| Capability | Observable behavior |
+| --- | --- |
+| Deep by default | Every search uses bounded deep research, usually 4–8 multi-angle searches. |
+| Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
+| Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
+| Explainable reliability | Multi-key Tavily circuits, `Retry-After`, and complete-stream validation. |
+| Stable compatibility | Standard MCP stdio, fixed tool schemas, and three stable outcome states. |
+
 Typical uses include retrieving current official documentation, producing answers with traceable sources, extracting pages as Markdown, and reusing the same web tools across MCP clients.
 
 ## Project status
@@ -32,7 +52,7 @@ Typical uses include retrieving current official documentation, producing answer
 - P0 repository and test baseline: complete.
 - P1 legacy crawler removal and modularization: complete.
 - P2 Tavily multi-key reliability: complete.
-- P3 Grok primary/fallback models and retries: complete.
+- P3 Grok single-model reliability and retries: complete.
 - P4 unified response protocol: complete.
 - P5 search prompt and quality work: complete.
 - Next: P6 real cross-client acceptance testing.
@@ -65,8 +85,7 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_FALLBACK_MODEL": "grok-3-mini",
-    "GROK_MODEL_MAX_ATTEMPTS": "3",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -95,9 +114,8 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | --- | --- | --- | --- |
 | `GROK_API_URL` | Yes | - | OpenAI-compatible API root with `/chat/completions` and `/models`. |
 | `GROK_API_KEY` | Yes | - | Grok API key. |
-| `GROK_PRIMARY_MODEL` | No | See below | Primary model used first for every Grok search. |
-| `GROK_FALLBACK_MODEL` | No | Unset | Fallback used after the primary model fails. |
-| `GROK_MODEL_MAX_ATTEMPTS` | No | `3` | Maximum real requests per distinct model; must be positive. |
+| `GROK_PRIMARY_MODEL` | No | See below | Strong model selected by the user for every Grok search. |
+| `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model. |
 | `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
@@ -115,7 +133,7 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 
 With Grok alone, `web_search` remains available. Setting `TAVILY_ENABLED=false` disables Tavily even when keys are present.
 
-Primary-model precedence is: a model selected by `switch_model` in the current process, non-empty `GROK_PRIMARY_MODEL`, non-empty `GROK_MODEL`, the persisted primary model, then `grok-4-fast`. Whitespace-only environment values are treated as unset. An empty or missing fallback disables switching. If the normalized primary and fallback IDs are equal, only one primary attempt group runs.
+Model precedence is: a model selected by `switch_model` in the current process, non-empty `GROK_PRIMARY_MODEL`, non-empty `GROK_MODEL`, the persisted model, then `grok-4-fast`. Whitespace-only values are treated as unset. The server does not downgrade to a weaker fallback model.
 
 ## Tool overview
 
@@ -130,13 +148,9 @@ Primary-model precedence is: a model selected by `switch_model` in the current p
 
 Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
 
-## Search quality and dynamic depth
+## Search quality and deep-first execution
 
-P5 classifies each `web_search` by complexity, freshness, and risk, then applies a bounded search depth:
-
-- `fast`: only explicit, low-ambiguity facts, usually 1–2 targeted searches.
-- `standard`: clearly bounded requests such as one official document, usually 2–4 targeted searches.
-- `deep`: the default for general research, freshness, people/organization profiles, records and awards, comparisons, high-risk, complex technical, niche, or contested questions; usually 4–8 multi-angle searches.
+Every `web_search` uses a bounded `deep` profile, usually 4–8 multi-angle searches, and stops when key claims converge. Simple facts and single official-document requests still receive deep verification, while the final answer remains appropriately concise.
 
 These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguous-entity research expands aliases, accounts, organizations, teams, collaborators, events, and date ranges, then separates directly confirmed, strongly supported, plausible, conflicting, and rejected links with explainable confidence. Missing one direct identity-binding page does not stop the investigation, but inference is not presented as fact. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
 
@@ -216,7 +230,7 @@ Grok succeeds but supplemental Tavily search fails:
 If Grok ultimately fails, successful Tavily results never become a fake Grok answer:
 
 ```json
-{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_and_fallback_failed","error_detail":{"code":"grok_primary_and_fallback_failed","message":"Both Grok models are unavailable","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":3,"fallback_attempts":3,"total_attempts":6}},"partial":false}
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"The Grok model failed after exhausting retries","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"switched_model":false}},"partial":false}
 ```
 
 Other tool examples:
@@ -230,15 +244,15 @@ Other tool examples:
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"The search plan is incomplete","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## Grok primary/fallback models and retries
+## One strong Grok model with five retries
 
-Each call starts with the primary model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay errors such as unavailable/dead upstream accounts or an unavailable account pool are retried with jittered exponential backoff. Each distinct model receives at most `GROK_MODEL_MAX_ATTEMPTS` real requests. The fallback has an independent counter, is selected at most once, and never loops back to the primary.
+Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay account-pool failures are retried with jittered exponential backoff, up to five real requests by default.
 
-Model-not-found, model-permission, and model-temporarily-unavailable errors stop attempts for that model and switch early. Explicit 400/422 request errors and 401/403 or explicit API-key authentication failures stop immediately without retrying or switching. Classification combines the HTTP status with OpenAI-compatible error objects, codes, types, and response semantics.
+Model-not-found and model-permission errors stop immediately; temporary model unavailability retries the same model. Explicit 400/422 request errors and 401/403 or explicit API-key authentication failures also stop immediately.
 
-Stream content is buffered until a valid completion signal. Partial content from an interrupted stream is never returned as a complete answer, cached, or used to extract sources. Final failures include a structured `grok_error` with both model names, per-model and total attempt counts, the last classification, HTTP/upstream code, and whether switching occurred. API keys and Authorization values are excluded. Successful Tavily results never masquerade as a complete Grok answer, and only the current MCP tool call ends.
+Stream content is buffered until a valid completion signal. Partial content from an interrupted stream is never returned, cached, or used to extract sources. Final failures report the current model and real attempt count while preserving legacy fallback fields as `null`, `0`, and `false`. API keys and Authorization values are excluded.
 
-`switch_model(model)` keeps its original call shape but now explicitly changes the primary model. It updates the active process and persists `primary_model` plus the legacy `model` field. It never changes `GROK_FALLBACK_MODEL`.
+`switch_model(model)` keeps its original call shape, updates the active model, and persists `primary_model` plus the legacy `model` field.
 
 ## Multiple Tavily keys
 

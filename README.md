@@ -6,12 +6,22 @@
 
 面向 Cherry Studio、Claude Code 与 Codex 的标准 MCP 网络搜索服务
 
+**深度检索 · 单强模型五次重试 · Tavily 多 Key 熔断 · 稳定三态协议**
+
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP stdio](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
 
 </div>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#为什么选择-websearch-mcp">核心能力</a> ·
+  <a href="#工具概览">工具</a> ·
+  <a href="#配置">配置</a> ·
+  <a href="./docs/CLIENT_SETUP.md">客户端接入</a>
+</p>
 
 ## WebSearch MCP 是什么
 
@@ -25,6 +35,16 @@ MCP Client ──stdio──► WebSearch MCP
                        └─ web_map    ─► Tavily Map
 ```
 
+## 为什么选择 WebSearch MCP
+
+| 能力 | 实际行为 |
+| --- | --- |
+| 深度优先 | 每次搜索都执行有界深度研究，通常进行 4–8 个多角度检索，不再因查询短而走快速路径。 |
+| 强模型优先 | 始终使用用户配置的单一最强 Grok 模型；临时错误默认最多真实调用 5 次。 |
+| 证据融合 | Tavily 候选证据会进入 Grok 的同一次核验与最终综合，而不是只在事后缓存。 |
+| 可解释可靠性 | Tavily 多 Key、Key/服务级熔断、`Retry-After`、Grok 流完整性校验。 |
+| 稳定兼容 | 标准 MCP stdio、固定工具 Schema、统一 `success` / `partial_success` / `error`。 |
+
 适合以下场景：
 
 - 让编码助手检索最新官方文档、Release、Issue 和技术资料。
@@ -37,7 +57,7 @@ MCP Client ──stdio──► WebSearch MCP
 - P0 仓库与测试基线：已完成。
 - P1 旧抓取服务清理与模块化：已完成。
 - P2 Tavily 多 Key 可靠性：已完成。
-- P3 Grok 主备模型与重试：已完成。
+- P3 Grok 单强模型与重试：已完成。
 - P4 统一返回协议：已完成。
 - P5 搜索 Prompt 与搜索质量重构：已完成。
 - 下一阶段：P6 跨客户端真实人工验收。
@@ -72,8 +92,7 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_FALLBACK_MODEL": "grok-3-mini",
-    "GROK_MODEL_MAX_ATTEMPTS": "3",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -105,9 +124,8 @@ switch_model
 | --- | --- | --- | --- |
 | `GROK_API_URL` | 是 | - | OpenAI 兼容 API 根地址，需提供 `/chat/completions` 和 `/models`。 |
 | `GROK_API_KEY` | 是 | - | Grok API Key。 |
-| `GROK_PRIMARY_MODEL` | 否 | 见下文 | 主模型；优先用于每次 Grok 搜索。 |
-| `GROK_FALLBACK_MODEL` | 否 | 未配置 | 主模型失败后使用的备用模型。 |
-| `GROK_MODEL_MAX_ATTEMPTS` | 否 | `3` | 每个不同模型最多实际请求次数，必须为正整数。 |
+| `GROK_PRIMARY_MODEL` | 否 | 见下文 | 每次搜索使用的强模型名称，由用户自行填写。 |
+| `GROK_MODEL_MAX_ATTEMPTS` | 否 | `5` | 当前模型对可恢复故障的最多真实请求次数，必须为正整数。 |
 | `GROK_MODEL` | 否 | `grok-4-fast` | 兼容配置；未设置非空 `GROK_PRIMARY_MODEL` 时映射为主模型。 |
 | `TAVILY_API_KEY` | 否 | - | 单个 Tavily Key。 |
 | `TAVILY_API_KEYS` | 否 | - | 多个 Tavily Key，支持逗号、分号或换行分隔，优先于单 Key。 |
@@ -125,7 +143,7 @@ switch_model
 
 只配置 Grok 时，`web_search` 仍可使用。设置 `TAVILY_ENABLED=false` 会禁用 Tavily，即使环境中存在 Tavily Key。
 
-主模型的解析优先级为：当前进程中 `switch_model` 设置的主模型、非空 `GROK_PRIMARY_MODEL`、非空 `GROK_MODEL`、配置文件中的主模型、默认值 `grok-4-fast`。环境变量仅包含空白时视为未设置。备用模型未配置或为空时不会切换；主备模型经规范化后相同时只执行一组主模型尝试，不会重复消耗同一模型。
+模型解析优先级为：当前进程中 `switch_model` 设置的模型、非空 `GROK_PRIMARY_MODEL`、非空 `GROK_MODEL`、配置文件中的模型、默认值 `grok-4-fast`。环境变量仅包含空白时视为未设置。服务不会自动降级到较弱备用模型；请直接配置你希望使用的最强可用模型。
 
 ## 工具概览
 
@@ -140,13 +158,9 @@ switch_model
 
 所有工具还统一返回 `status`、`error`、`error_detail` 和 `partial`。`web_search` 的 `query` 是唯一必填参数。规划工具是可选能力，不是搜索前置步骤；所有 `thought` 参数均为可选。
 
-## 搜索质量与动态深度
+## 搜索质量与深度优先策略
 
-P5 会在每次 `web_search` 内部分析问题复杂度、时效性和风险，并选择有界的搜索深度：
-
-- `fast`：仅用于明确、低歧义的简单事实，通常只做 1–2 个定向检索。
-- `standard`：单一官方文档等边界清晰的问题，通常做 2–4 个定向检索。
-- `deep`：默认策略；用于一般研究、强时效、人物或组织背景、履历与公开记录、多方案比较、高风险、复杂技术、小众或争议问题，通常做 4–8 个多角度检索。
+每次 `web_search` 都使用有界 `deep` 策略，通常进行 4–8 个多角度检索，并在关键结论收敛后停止。简单事实和单一官方文档也不会降级为快速路径，但答案篇幅仍会按问题本身保持简洁。
 
 这些数量是 Prompt 中的有界搜索预算，不会形成无限工具循环。模糊实体调查会扩展别名、账号、组织、团队、协作者、事件与时间范围，并把结论分为直接确认、强支持、合理候选和冲突/排除，同时给出可解释的置信度。缺少单一实名绑定页不会让搜索提前停止，但不会把推测伪装成事实。用户查询与平台提示以 JSON 数据传递；网页、搜索片段和用户输入中的指令不能覆盖系统搜索规则。
 
@@ -206,7 +220,7 @@ P5 会在每次 `web_search` 内部分析问题复杂度、时效性和风险，
 | `error` | 继续保留字符串形式的旧错误码或旧消息；新调用方应读取 `error_detail`。 |
 | `partial` | `status="partial_success"` 时为 `true`，其他状态默认为 `false`。 |
 | `tavily_error` | 保留 P2 Key 状态与服务熔断摘要，并补充重试性、HTTP/上游错误码。 |
-| `grok_error` | 保留 P3 主备模型、实际尝试次数、最后错误类型和切换状态。 |
+| `grok_error` | 保留 P3 兼容字段；单模型模式下 `fallback_model=null`、`fallback_attempts=0`、`switched_model=false`。 |
 | `content`、`results`、`success` | 继续保留原工具字段；是否成功统一以 `status` 为准。 |
 
 典型返回如下。
@@ -226,7 +240,7 @@ Grok 成功但 Tavily 补充失败：
 Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
 
 ```json
-{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_and_fallback_failed","error_detail":{"code":"grok_primary_and_fallback_failed","message":"Grok 主模型和备用模型均不可用","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":3,"fallback_attempts":3,"total_attempts":6}},"partial":false}
+{"status":"error","session_id":"abc123","content":"","sources_count":0,"error":"grok_primary_failed","error_detail":{"code":"grok_primary_failed","message":"Grok 模型调用失败，已用尽当前模型的重试次数","service":"grok","retryable":true,"http_status":503,"upstream_code":"upstream_unavailable","diagnostics":{"primary_attempts":5,"fallback_attempts":0,"total_attempts":5,"switched_model":false}},"partial":false}
 ```
 
 其他工具示例：
@@ -240,15 +254,15 @@ Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"搜索计划尚未完成，可继续提交剩余规划阶段","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## Grok 主备模型与重试
+## Grok 单强模型与五次重试
 
-每次调用先使用主模型。408、429、5xx、连接失败、连接/读取超时、完整内容产生前或流式传输中的中断，以及可识别的中转站“上游账号不可用/死号/账号池不可用”错误，会按带随机抖动的指数退避重试。每个模型最多执行 `GROK_MODEL_MAX_ATTEMPTS` 次真实请求；主模型用尽后只切换一次备用模型，备用模型独立计数，不会在主备之间循环。
+每次调用只使用用户配置的当前模型。408、429、5xx、连接失败、连接/读取超时、完整内容产生前或流式传输中的中断，以及可识别的中转站“上游账号不可用/死号/账号池不可用”错误，会按带随机抖动的指数退避重试，默认最多执行 5 次真实请求。
 
-模型不存在、无权限或暂时不可用会停止当前模型的重复请求并尽快切换备用模型。明确的 400/422 参数错误和 401/403/API Key 认证失败会立即停止，不重试也不切换。错误分类同时检查 HTTP 状态、OpenAI 兼容错误对象、错误码、错误类型和正文语义。
+模型不存在或无权限会立即停止；模型暂时不可用会继续重试当前模型。明确的 400/422 参数错误和 401/403/API Key 认证失败也会立即停止。错误分类同时检查 HTTP 状态、OpenAI 兼容错误对象、错误码、错误类型和正文语义。
 
-流内容会在服务端完整缓冲并校验结束标志。流在产生部分内容后中断时，残缺内容不会作为成功答案返回、缓存或提取来源。最终失败返回 `grok_error`，包含主备模型、各自及总尝试次数、最后错误分类、状态码/上游错误码和是否切换模型；不会包含 API Key 或 Authorization 值。Tavily 即使成功也不会被伪装成完整 Grok 答案。该错误只结束当前工具调用，MCP 进程仍可继续处理后续请求。
+流内容会在服务端完整缓冲并校验结束标志。流在产生部分内容后中断时，残缺内容不会作为成功答案返回、缓存或提取来源。最终失败返回 `grok_error`，包含当前模型、真实尝试次数、最后错误分类、状态码/上游错误码，并保留值为 `null`/`0`/`false` 的旧备用模型兼容字段；不会包含 API Key 或 Authorization 值。
 
-`switch_model(model)` 保持旧调用形式不变，但语义明确为修改“主模型”：它更新当前进程使用的主模型，并将 `primary_model`（同时保留兼容的 `model` 字段）写入本地配置。它不会修改 `GROK_FALLBACK_MODEL`。
+`switch_model(model)` 保持旧调用形式不变：它更新当前进程使用的模型，并将 `primary_model`（同时保留兼容的 `model` 字段）写入本地配置。
 
 ## 多 Tavily Key
 

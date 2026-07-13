@@ -228,6 +228,7 @@ class GrokClient:
         supplemental_sources: list[dict[str, str]] | None = None,
     ) -> str:
         primary = primary_model or self.model
+        _ = fallback_model  # Deprecated compatibility argument; single-model mode ignores it.
         if not primary:
             raise ValueError("Grok 主模型未配置")
         attempts_limit = (
@@ -235,9 +236,6 @@ class GrokClient:
         )
         if attempts_limit < 1:
             raise ValueError("每个模型的最大尝试次数必须大于或等于 1")
-        reported_fallback = fallback_model
-        fallback = fallback_model if fallback_model and fallback_model != primary else None
-
         messages = build_search_messages(
             query,
             platform,
@@ -246,65 +244,32 @@ class GrokClient:
         await log_info(ctx, "Prepared bounded search request", config.debug_enabled)
 
         counts = {primary: 0}
-        if fallback:
-            counts[fallback] = 0
         last_failure = _AttemptFailure("upstream_unavailable", action="retry")
-        switched = False
+        for attempt_number in range(1, attempts_limit + 1):
+            counts[primary] += 1
+            payload = {"model": primary, "messages": messages, "stream": True}
+            try:
+                result = await self._execute_stream(payload)
+                await log_info(ctx, f"Grok model {primary} completed", config.debug_enabled)
+                return result
+            except _AttemptFailure as exc:
+                last_failure = exc
+                if exc.action == "fatal":
+                    raise self._final_error(primary, counts, exc) from exc
+                if attempt_number >= attempts_limit:
+                    break
+                await self._sleep(self._retry_delay(attempt_number, exc.retry_after))
+            except Exception as exc:
+                last_failure = _AttemptFailure("client_error", action="fatal")
+                raise self._final_error(primary, counts, last_failure) from exc
 
-        for index, model in enumerate([primary] + ([fallback] if fallback else [])):
-            if model is None:
-                continue
-            if index == 1:
-                switched = True
-            for attempt_number in range(1, attempts_limit + 1):
-                counts[model] += 1
-                payload = {"model": model, "messages": messages, "stream": True}
-                try:
-                    result = await self._execute_stream(payload)
-                    await log_info(ctx, f"Grok model {model} completed", config.debug_enabled)
-                    return result
-                except _AttemptFailure as exc:
-                    last_failure = exc
-                    if exc.action == "fatal":
-                        raise self._final_error(
-                            primary,
-                            fallback,
-                            reported_fallback,
-                            counts,
-                            exc,
-                            switched,
-                        ) from exc
-                    if exc.action == "switch" or attempt_number >= attempts_limit:
-                        break
-                    await self._sleep(self._retry_delay(attempt_number, exc.retry_after))
-                except Exception as exc:
-                    last_failure = _AttemptFailure("client_error", action="fatal")
-                    raise self._final_error(
-                        primary,
-                        fallback,
-                        reported_fallback,
-                        counts,
-                        last_failure,
-                        switched,
-                    ) from exc
-
-        raise self._final_error(
-            primary,
-            fallback,
-            reported_fallback,
-            counts,
-            last_failure,
-            switched,
-        )
+        raise self._final_error(primary, counts, last_failure)
 
     def _final_error(
         self,
         primary: str,
-        fallback: str | None,
-        reported_fallback: str | None,
         counts: dict[str, int],
         failure: _AttemptFailure,
-        switched: bool,
     ) -> GrokClientError:
         if failure.error_type == "authentication_error":
             code = "grok_authentication_error"
@@ -312,25 +277,18 @@ class GrokClient:
         elif failure.error_type == "request_invalid":
             code = "grok_request_invalid"
             message = "Grok 请求参数无效，已停止重复请求"
-        elif fallback and switched:
-            code = "grok_primary_and_fallback_failed"
-            message = "Grok 主模型和备用模型均不可用"
         else:
             code = "grok_primary_failed"
-            message = (
-                "Grok 主模型调用失败，且未配置可用的不同备用模型"
-                if not fallback
-                else "Grok 主模型调用失败"
-            )
+            message = "Grok 模型调用失败，已用尽当前模型的重试次数"
         return GrokClientError(
             code=code,
             message=message,
             primary_model=primary,
-            fallback_model=reported_fallback,
+            fallback_model=None,
             primary_attempts=counts.get(primary, 0),
-            fallback_attempts=counts.get(fallback, 0) if fallback else 0,
+            fallback_attempts=0,
             last_failure=failure,
-            switched_model=switched,
+            switched_model=False,
         )
 
     def _retry_delay(self, attempt_number: int, retry_after: float | None) -> float:
@@ -459,21 +417,21 @@ class GrokClient:
         if self._matches(combined, _MODEL_NOT_FOUND_PATTERNS):
             return _AttemptFailure(
                 "model_not_found",
-                action="switch",
+                action="fatal",
                 http_status=status,
                 upstream_code=upstream_code,
             )
         if self._matches(combined, _MODEL_PERMISSION_PATTERNS):
             return _AttemptFailure(
                 "model_permission_denied",
-                action="switch",
+                action="fatal",
                 http_status=status,
                 upstream_code=upstream_code,
             )
         if self._matches(combined, _MODEL_UNAVAILABLE_PATTERNS):
             return _AttemptFailure(
                 "model_unavailable",
-                action="switch",
+                action="retry",
                 http_status=status,
                 upstream_code=upstream_code,
             )

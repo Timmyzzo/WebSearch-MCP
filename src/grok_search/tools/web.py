@@ -202,7 +202,6 @@ async def web_search(
         api_url = config.grok_api_url
         api_key = config.grok_api_key
         configured_primary = config.grok_primary_model
-        configured_fallback = config.grok_fallback_model
         max_attempts = config.grok_model_max_attempts
     except ValueError as exc:
         message = f"配置错误: {exc}"
@@ -265,7 +264,6 @@ async def web_search(
                 query,
                 platform,
                 primary_model=effective_model,
-                fallback_model=configured_fallback,
                 max_attempts=max_attempts,
                 supplemental_sources=supplemental_sources,
             )

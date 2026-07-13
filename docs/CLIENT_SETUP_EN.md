@@ -20,8 +20,7 @@ Minimum environment:
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
 GROK_PRIMARY_MODEL=grok-4-fast
-GROK_FALLBACK_MODEL=grok-3-mini
-GROK_MODEL_MAX_ATTEMPTS=3
+GROK_MODEL_MAX_ATTEMPTS=5
 ```
 
 Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
@@ -48,8 +47,7 @@ Add a stdio MCP server:
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
         "GROK_PRIMARY_MODEL": "grok-4-fast",
-        "GROK_FALLBACK_MODEL": "grok-3-mini",
-        "GROK_MODEL_MAX_ATTEMPTS": "3",
+        "GROK_MODEL_MAX_ATTEMPTS": "5",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
     }
@@ -77,7 +75,6 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }'
@@ -101,7 +98,6 @@ $config = @'
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_FALLBACK_MODEL": "grok-3-mini",
     "TAVILY_API_KEY": "tvly-your-tavily-key"
   }
 }
@@ -136,8 +132,7 @@ tool_timeout_sec = 180
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
 GROK_PRIMARY_MODEL = "grok-4-fast"
-GROK_FALLBACK_MODEL = "grok-3-mini"
-GROK_MODEL_MAX_ATTEMPTS = "3"
+GROK_MODEL_MAX_ATTEMPTS = "5"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
 
@@ -179,7 +174,7 @@ P5 adds no client parameters or response fields. `web_search` defaults to bounde
 | Startup timeout | The first run may download dependencies; increase the startup timeout. |
 | Invalid JSON | Check quotes and trailing commas; use a PowerShell here-string on Windows. |
 | Grok connection failure | Verify the API root and `/models` support. |
-| Both Grok models fail | Inspect `error_detail` first, then the compatible `grok_error` attempt counts and classification; authentication and request errors do not switch models. |
+| The Grok model ultimately fails | Inspect `error_detail` first, then the compatible `grok_error` attempt count and classification; authentication, request, missing-model, and permission errors stop immediately. |
 | Fetch or map configuration error | Configure Tavily and ensure `TAVILY_ENABLED` is not `false`. |
 | Client displays partial success | Inspect `status="partial_success"`, `error_detail`, and the component compatibility field; the usable result is still available. |
 | Certificate verification failure | Add `--native-tls` or inspect the corporate proxy certificate. |

@@ -115,7 +115,6 @@ async def test_stdio_grok_failover_error_is_structured_and_server_stays_alive():
     env["GROK_API_URL"] = f"http://127.0.0.1:{upstream.server_port}"
     env["GROK_API_KEY"] = "grok-secret-key"
     env["GROK_PRIMARY_MODEL"] = "primary"
-    env["GROK_FALLBACK_MODEL"] = "fallback"
     env["GROK_MODEL_MAX_ATTEMPTS"] = "1"
     env["TAVILY_ENABLED"] = "false"
     server = StdioServerParameters(
@@ -140,10 +139,10 @@ async def test_stdio_grok_failover_error_is_structured_and_server_stays_alive():
 
     structured = search_result.structuredContent
     assert search_result.isError is False
-    assert structured["error"] == "grok_primary_and_fallback_failed"
+    assert structured["error"] == "grok_primary_failed"
     assert structured["grok_error"]["primary_attempts"] == 1
-    assert structured["grok_error"]["fallback_attempts"] == 1
-    assert structured["grok_error"]["total_attempts"] == 2
+    assert structured["grok_error"]["fallback_attempts"] == 0
+    assert structured["grok_error"]["total_attempts"] == 1
     assert "grok-secret-key" not in str(structured)
     assert {tool.name for tool in tools_after_error.tools}.issuperset({"web_search", "web_fetch"})
 
@@ -189,7 +188,6 @@ async def test_stdio_unified_success_partial_error_validation_and_survival():
     env["GROK_API_URL"] = f"http://127.0.0.1:{grok_upstream.server_port}"
     env["GROK_API_KEY"] = "grok-secret-key"
     env["GROK_PRIMARY_MODEL"] = "primary"
-    env["GROK_FALLBACK_MODEL"] = "fallback"
     env["GROK_MODEL_MAX_ATTEMPTS"] = "1"
     env["TAVILY_API_URL"] = f"http://127.0.0.1:{tavily_upstream.server_port}"
     env["TAVILY_API_KEYS"] = "tvly-secret-key-0001,tvly-secret-key-0002"
