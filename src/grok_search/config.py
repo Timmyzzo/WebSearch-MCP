@@ -94,32 +94,6 @@ class Config:
         return value
 
     @property
-    def grok_api_protocol(self) -> str:
-        raw = os.getenv("GROK_API_PROTOCOL", "chat_completions").strip().lower()
-        aliases = {
-            "chat": "chat_completions",
-            "chat_completions": "chat_completions",
-            "responses": "responses",
-        }
-        try:
-            return aliases[raw]
-        except KeyError as exc:
-            raise ValueError(
-                "GROK_API_PROTOCOL 必须是 chat_completions 或 responses"
-            ) from exc
-
-    @property
-    def grok_responses_max_tool_calls(self) -> int:
-        raw = os.getenv("GROK_RESPONSES_MAX_TOOL_CALLS", "16").strip()
-        try:
-            value = int(raw)
-        except ValueError as exc:
-            raise ValueError("GROK_RESPONSES_MAX_TOOL_CALLS 必须是 7 到 32 的整数") from exc
-        if not 7 <= value <= 32:
-            raise ValueError("GROK_RESPONSES_MAX_TOOL_CALLS 必须介于 7 和 32 之间")
-        return value
-
-    @property
     def retry_multiplier(self) -> float:
         return float(os.getenv("GROK_RETRY_MULTIPLIER", "1"))
 
@@ -243,11 +217,7 @@ class Config:
             url = self.grok_api_url
         except ValueError:
             return model
-        if (
-            "openrouter" in url
-            and self.grok_api_protocol == "chat_completions"
-            and ":online" not in model
-        ):
+        if "openrouter" in url and ":online" not in model:
             return f"{model}:online"
         return model
 
@@ -340,8 +310,6 @@ class Config:
             "GROK_MODEL_MAX_ATTEMPTS": max_attempts,
             "GROK_MAX_CONCURRENCY": self.grok_max_concurrency,
             "WEB_SEARCH_TOTAL_TIMEOUT": self.web_search_total_timeout,
-            "GROK_API_PROTOCOL": self.grok_api_protocol,
-            "GROK_RESPONSES_MAX_TOOL_CALLS": self.grok_responses_max_tool_calls,
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,

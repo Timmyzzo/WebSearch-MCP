@@ -17,7 +17,7 @@ src/grok_search/
 ├─ prompts.py             Grok 搜索 Prompt
 ├─ sources.py             信源提取、合并与会话缓存
 ├─ clients/
-│  ├─ grok.py             Grok Chat/Responses 客户端、引用解析与完整性校验
+│  ├─ grok.py             Grok Chat Completions 客户端与流完整性校验
 │  └─ tavily.py           Tavily Search、Extract、Map 客户端
 └─ tools/
    ├─ web.py              搜索、信源、抓取与映射工具
@@ -54,7 +54,7 @@ uv run python -m build
 - stdio 同一进程内的成功、部分成功、错误、参数校验错误及错误后存活。
 - Grok 进程级最大并发 2、Tavily 每 Key 最大并发 1、不同 Key 并行、排队计入预算、重试受限和取消/异常释放。
 - `web_search` 总预算耗尽、正确终止文案/诊断、超时后 stdio 存活及并发来源/会话隔离。
-- Responses 显式 `web_search` 请求、citations/annotations/search trace、残缺响应重试、超时、取消、并发隔离和 stdio 错误后存活。
+- Chat Completions 流式请求、残缺流重试、超时、取消、并发隔离和 stdio 错误后存活。
 - 来源会话 TTL/LRU 与模型目录 TTL 刷新。
 
 ## 3. MCP 兼容约束
@@ -127,8 +127,7 @@ P5 在不改变工具 Schema、P2/P3 可靠性和 P4 返回协议的前提下增
 
 外部项目代码审计后的兼容增强包括：
 
-- `GROK_API_PROTOCOL=chat_completions|responses`；Chat 保持默认，Responses 是显式启用的可审计路径，不自动切换协议。
-- Responses 请求使用 `/responses`、服务端 `web_search`、`parallel_tool_calls=true`、`store=false` 和 7–32 的有界 `max_tool_calls`。
+- 上游协议固定为流式 `/chat/completions`，不提供运行时协议选择或 `/responses` 降级链。
 - 仅 `status=completed` 且答案非空时成功；`incomplete`、`in_progress`、空内容和无效 JSON 复用 P3 重试、总预算、并发槽位和错误分类。
 - citations、inline annotations、search result 与 open-page URL 被规范化并加入来源会话；Tavily 仍先进入 Grok 最终综合，不能替代失败答案。
 - 来源会话为最大 256 项、1 小时 TTL 的进程内 LRU；模型目录成功结果缓存 5 分钟，失败不缓存。
@@ -150,7 +149,7 @@ git diff --check
 同时确认：
 
 - 新增环境变量已写入中英文 README。
-- Responses 配置已写入中英文客户端指南，并明确端点兼容性、`store=false` 和 Chat 回退方法。
+- Chat-only 配置已写入中英文客户端指南，并明确 API 根地址和客户端超时。
 - Cherry Studio 文档明确 300 秒客户端上限、270 秒服务端预算、120 秒单次读取上限及并发等待/重试关系。
 - 工具 Schema 变更有自动化测试。
 - 错误消息不包含完整 API Key。

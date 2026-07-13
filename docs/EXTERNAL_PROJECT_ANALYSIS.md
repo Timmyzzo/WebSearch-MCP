@@ -118,9 +118,9 @@
 
 | 改进 | 收益 | 复杂度 | 兼容风险 | 维护成本 | 结论 |
 | --- | --- | --- | --- | --- | --- |
-| 可选 Responses + 显式 `web_search` | 很高：真搜索、可审计引用 | 中 | 中；部分中转站不支持 | 中 | 本次实现，默认关闭 |
-| citations/search trace 进入 `get_sources` | 高：来源不再只依赖回答尾部 | 中 | 低 | 低 | 本次实现 |
-| `store=false` | 高：避免官方默认 30 天保存 | 低 | 低 | 低 | 本次实现 |
+| 可选 Responses + 显式 `web_search` | 很高：真搜索、可审计引用 | 中 | 中；部分中转站不支持 | 中 | 评估后移除；产品仅保留 Chat |
+| citations/search trace 进入 `get_sources` | 高：来源不再只依赖回答尾部 | 中 | 低 | 低 | 随 Responses 路径移除 |
+| `store=false` | 高：避免官方默认 30 天保存 | 低 | 低 | 低 | Responses 专属，未采用 |
 | 来源会话 TTL | 中：长期进程内存与陈旧会话有界 | 低 | 低 | 低 | 本次实现，1 小时 |
 | 模型目录 TTL | 中：避免永久陈旧 | 低 | 低 | 低 | 本次实现，5 分钟 |
 | Responses 域名/X 过滤公共参数 | 中 | 中 | 高：会改变 MCP Schema | 中 | 暂不实现 |
@@ -130,18 +130,14 @@
 
 ## 7. 本次采用的实现
 
-- 新增 `GROK_API_PROTOCOL=chat_completions|responses`，默认 `chat_completions`，不改变现有部署。
-- 新增 `GROK_RESPONSES_MAX_TOOL_CALLS=16`，允许 7–32；下限与 5 个广度视角加 2 个深挖方向一致。
-- Responses 使用非流式 `/responses`、显式 `web_search`、`parallel_tool_calls=true`、`store=false`。
-- OpenRouter Responses 使用专用 `openrouter:web_search`，且不追加 Chat 模式的 `:online`。
-- 只有 `status=completed` 且答案非空才成功；`incomplete`、`in_progress`、空内容和无效 JSON 进入现有 P3 重试。
-- citations、annotations、search result 和 open-page URL 合并后进入现有来源缓存；保留 `provider=grok-responses`。
-- Responses 继续服从最多 5 次真实请求、270 秒总预算、Grok 并发 2、取消释放、错误分类和 P4 组合语义。
+- 运行时固定使用流式 `/v1/chat/completions`，删除协议选择环境变量和 Responses 请求/解析路径。
+- 中转站只需兼容 `/v1/chat/completions` 与 `/v1/models`。
+- Chat 请求继续服从最多 5 次真实请求、270 秒总预算、Grok 并发 2、取消释放、错误分类和 P4 组合语义。
 - 来源会话默认 1 小时过期且最多 256 项；模型目录成功结果缓存 5 分钟，失败不缓存。
 
 ## 8. 明确拒绝的替代设计
 
-- 不把 Responses 设为无条件默认：当前用户可能依赖只提供 Chat Completions 的中转站。
+- 不提供 Responses 可选开关：产品只面向 Chat Completions 中转站，避免维护第二套协议语义。
 - 不在 Grok 失败时返回 Tavily 答案：保持“Grok 失败、Tavily 成功仍为 `error`”。
 - 不把 Tavily 改回并列展示：候选证据必须由 Grok 核验并综合。
 - 不新增 Firecrawl、Direct Fetch、浏览器自动化或新的抓取服务。
@@ -151,13 +147,6 @@
 
 ## 9. 自动化验证
 
-新增测试覆盖：
+新增测试覆盖来源会话 TTL/LRU、模型目录 TTL 刷新，以及 Chat 流中断、超时、取消、共享槽位释放和 stdio 错误后存活。
 
-- Responses 请求 Schema、`store=false` 和显式 `web_search`。
-- citations、annotations、search trace 的提取、去重和 provider 保留。
-- `incomplete` 不返回、不缓存并按预算重试。
-- Responses 读取超时、取消释放共享槽位、并发来源隔离。
-- stdio Responses 成功、来源读取、残缺错误和错误后配置调用存活。
-- 来源会话 TTL/LRU 和模型目录 TTL 刷新。
-
-参考仓库测试结果：BlueOcean 4 组 Node 测试通过；GuDaStudio 无自动化测试但构建成功。当前项目最终验证为 152 个 pytest 全部通过，Ruff、构建、diff check、Schema/stdio 回归和安全扫描全部通过。
+参考仓库测试结果：BlueOcean 4 组 Node 测试通过；GuDaStudio 无自动化测试但构建成功。Chat-only 收敛后的当前项目验证为 144 个 pytest 全部通过，Ruff、构建和 diff check 全部通过。

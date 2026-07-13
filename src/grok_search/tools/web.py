@@ -32,7 +32,7 @@ _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
 _GROK_CLIENT: GrokClient | None = None
-_GROK_CLIENT_SIGNATURE: tuple[str, str, int, str, int] | None = None
+_GROK_CLIENT_SIGNATURE: tuple[str, str, int] | None = None
 _GROK_CLIENT_LOCK = asyncio.Lock()
 _GROK_CONCURRENCY_LIMITER: AsyncConcurrencyLimiter | None = None
 
@@ -48,8 +48,6 @@ def _new_grok_client(api_url: str, api_key: str) -> GrokClient:
         api_url,
         api_key,
         concurrency_limiter=_GROK_CONCURRENCY_LIMITER,
-        api_protocol=config.grok_api_protocol,
-        responses_max_tool_calls=config.grok_responses_max_tool_calls,
     )
 
 
@@ -59,8 +57,6 @@ async def _get_grok_client(api_url: str, api_key: str) -> GrokClient:
         api_url,
         api_key,
         config.grok_max_concurrency,
-        config.grok_api_protocol,
-        config.grok_responses_max_tool_calls,
     )
     async with _GROK_CLIENT_LOCK:
         if _GROK_CLIENT is not None and _GROK_CLIENT_SIGNATURE != signature:
@@ -283,8 +279,6 @@ async def web_search(
         configured_primary = config.grok_primary_model
         max_attempts = config.grok_model_max_attempts
         _ = config.grok_max_concurrency
-        _ = config.grok_api_protocol
-        _ = config.grok_responses_max_tool_calls
     except ValueError as exc:
         message = f"配置错误: {exc}"
         detail = make_error_detail(

@@ -13,7 +13,7 @@
 
 项目优先级依次为：可用性、答案准确性与前沿性、故障可解释性、跨客户端兼容性、性能与维护性。
 
-当前进度：P0、P1、P2、P3、P4、P5、外部项目代码审计、可选 Responses 协议及搜索超时/并发治理自动化实现已完成；下一阶段为 P6 跨客户端真实人工验收，其中 Cherry Studio 仍需在 300 秒工具外层超时下复验并发和长搜索。
+当前进度：P0、P1、P2、P3、P4、P5、外部项目代码审计及搜索超时/并发治理自动化实现已完成；运行时固定使用 Chat Completions。下一阶段为 P6 跨客户端真实人工验收，其中 Cherry Studio 仍需在 300 秒工具外层超时下复验并发和长搜索。
 
 ## 2. 已确认的产品决策
 
@@ -22,7 +22,7 @@
 - [x] Tavily 多 Key 采用轮询作为正常调度方式。
 - [x] Tavily Key 出错时按状态码和响应内容分类，采用不同熔断策略。
 - [x] Grok 使用用户配置的单一强模型；可恢复故障默认最多真实调用 5 次，不自动降级模型。
-- [x] Chat Completions 保持兼容默认；可选 Responses 显式调用服务端 `web_search`，但失败时不自动切换协议。
+- [x] 上游固定使用 Chat Completions，失败时不切换到其他协议或端点。
 - [x] 单次 `web_search` 默认使用约 270 秒服务端总墙钟预算，在客户端 300 秒外层超时前主动返回；等待、请求、流读取、退避和重试都服从同一预算。
 - [x] 同一 MCP 进程最多并发 2 个 Grok HTTP 请求；Tavily Search、Extract、Map 每个 Key 合计最多并发 1 个真实请求。
 - [x] MCP 必须兼容 Cherry Studio、Claude Code 和 Codex，核心能力不得依赖某个客户端的私有配置。
@@ -155,15 +155,12 @@
 - [x] 等待 Grok/Tavily 槽位计入调用总预算；`Retry-After` 和退避只有在仍能容纳合理新尝试时才执行。
 - [x] 终止原因区分最大尝试次数耗尽、不可重试错误提前停止、总预算耗尽和并发排队耗尽，并输出脱敏尝试/耗时/预算/排队诊断。
 
-### 5.6 可选 Responses 协议
+### 5.6 单一 Chat Completions 协议
 
-- [x] `GROK_API_PROTOCOL=chat_completions|responses` 不改变 MCP 公共工具参数；默认仍为 Chat。
-- [x] Responses 使用非流式 `/responses`、显式 `web_search`、`parallel_tool_calls=true` 和 `store=false`。
-- [x] `GROK_RESPONSES_MAX_TOOL_CALLS` 默认 16、范围 7–32，与 5 个广度视角和 2 个深挖方向的最低要求一致。
-- [x] 解析 top-level citations、inline annotations、search result 和 open-page URL，并通过现有 `get_sources` 返回。
-- [x] 只有 `status=completed` 且答案非空才成功；残缺/进行中响应不得返回或缓存，并复用 P3 重试与总预算。
-- [x] OpenRouter Responses 使用专用搜索工具类型且不追加 Chat 的 `:online` 后缀。
-- [x] Responses 失败仍遵守 P4：Tavily 不得替代 Grok 最终答案。
+- [x] 运行时只调用流式 `/chat/completions`，不暴露协议选择环境变量。
+- [x] 中转站只需提供 `/v1/chat/completions` 与 `/v1/models`。
+- [x] 请求复用 270 秒总预算、最多五次真实尝试、Grok 并发 2、取消释放和错误分类。
+- [x] Tavily 不得在 Grok 失败时替代最终答案。
 
 ## 6. 搜索质量目标
 
@@ -319,7 +316,7 @@ P4 的兼容实现约定：
 
 - [x] 逐一审计 `BlueOcean223/grok-search` 与 `GuDaStudio/GrokSearch` 的默认分支代码、Prompt、请求编排、错误、缓存、超时、并发、来源和测试。
 - [x] 核对 MIT 许可证并区分概念借鉴与代码复用；没有复制大段第三方实现。
-- [x] 对照 xAI 官方 Responses、Web Search 和 Citations 文档实现可选协议。
+- [x] 对照 xAI 官方协议文档完成评估，最终仅保留 Chat Completions 运行时路径。
 - [x] 记录采用、拒绝和维护边界，见 `docs/EXTERNAL_PROJECT_ANALYSIS.md`。
 
 ### P6：跨客户端验收
@@ -359,7 +356,7 @@ P4 的兼容实现约定：
 - Tavily 正常轮询，多种错误能正确分类并切换 Key。
 - 所有 Tavily Key 不可用时，当前调用快速停止并明确提醒用户。
 - Grok 可恢复故障在当前强模型上重试，最终失败时返回清晰错误。
-- 支持在兼容端点上显式启用 Responses `web_search`，并能审计 citations/search trace；默认 Chat 部署不受影响。
+- 兼容端点只需支持 Chat Completions；不启用 Responses 或协议自动切换。
 - 所有核心与保留规划工具使用统一三态和通用脱敏错误对象，并保留 P2/P3 兼容字段。
 - 空内容、空 URL 和异常失败不会伪装成成功；工具错误后 MCP 进程仍可继续服务。
 - 搜索结果优先最新、权威和原始资料，并能解释证据等级与限制。

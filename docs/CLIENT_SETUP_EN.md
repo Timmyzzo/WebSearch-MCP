@@ -23,15 +23,13 @@ GROK_PRIMARY_MODEL=grok-4-fast
 GROK_MODEL_MAX_ATTEMPTS=5
 GROK_MAX_CONCURRENCY=2
 WEB_SEARCH_TOTAL_TIMEOUT=270
-GROK_API_PROTOCOL=chat_completions
-GROK_RESPONSES_MAX_TOOL_CALLS=16
 ```
 
 Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
 
 If `GROK_PRIMARY_MODEL` is empty or unset, the compatibility variable `GROK_MODEL` is used before the persisted setting and `grok-4-fast`. The service uses that one strong model without automatic fallback. Recoverable failures receive at most five real requests by default.
 
-`GROK_API_PROTOCOL` defaults to `chat_completions`. Set it to `responses` only when the upstream exposes `/responses` and server-side `web_search`. Responses mode parses structured citations/search traces and always sends `store=false`. `GROK_RESPONSES_MAX_TOOL_CALLS` defaults to 16 and must remain between 7 and 32, so the server-side tool loop stays bounded.
+The upstream protocol is fixed to streaming `/v1/chat/completions`; `/responses` and runtime protocol switching are not supported. `GROK_API_URL` should normally end in `/v1` and also expose `/models`.
 
 Optional reliability settings are `TAVILY_PER_KEY_MAX_CONCURRENCY=1`, `TAVILY_KEY_COOLDOWN=30`, `TAVILY_QUOTA_COOLDOWN=3600`, `TAVILY_SERVICE_FAILURE_THRESHOLD=2`, and `TAVILY_SERVICE_COOLDOWN=30`. The Grok safety ceiling is two concurrent requests, and Tavily currently requires one request per key. The defaults are appropriate for most setups.
 
@@ -56,8 +54,6 @@ Add a stdio MCP server:
         "GROK_MODEL_MAX_ATTEMPTS": "5",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
-        "GROK_API_PROTOCOL": "chat_completions",
-        "GROK_RESPONSES_MAX_TOOL_CALLS": "16",
         "TAVILY_PER_KEY_MAX_CONCURRENCY": "1",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
@@ -148,8 +144,6 @@ GROK_PRIMARY_MODEL = "grok-4-fast"
 GROK_MODEL_MAX_ATTEMPTS = "5"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
-GROK_API_PROTOCOL = "chat_completions"
-GROK_RESPONSES_MAX_TOOL_CALLS = "16"
 TAVILY_PER_KEY_MAX_CONCURRENCY = "1"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
@@ -181,7 +175,6 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 6. After a structured error, list or call tools again and confirm that the MCP process remains alive.
 7. Start two concurrent `web_search` calls and then a third; confirm that the third queues and all three return a business result or structured error within 300 seconds.
 8. Confirm that `grok_error.termination_reason`, configured/actual attempts, elapsed time, budget, and queue wait match the observed behavior.
-9. If the endpoint supports Responses, temporarily set `GROK_API_PROTOCOL=responses`. Confirm that `get_sources` includes structured entries with `provider="grok-responses"`; then simulate an incomplete response or timeout and verify that partial output is not returned and later tools remain callable.
 
 The canonical error object is `error_detail`, with at least `code`, `message`, `service`, and `retryable`; it also includes `http_status`, `upstream_code`, and redacted `diagnostics` when available. Legacy `error`, `partial`, `tavily_error`, and `grok_error` fields remain available.
 
@@ -200,7 +193,6 @@ Source sessions retain at most 256 entries and expire after one hour. Successful
 | Invalid JSON | Check quotes and trailing commas; use a PowerShell here-string on Windows. |
 | Grok connection failure | Verify the API root and `/models` support. |
 | The Grok model ultimately fails | Inspect `error_detail` first, then the compatible `grok_error` attempt count and classification; authentication, request, missing-model, and permission errors stop immediately. |
-| Responses returns 400/422 | Restore `GROK_API_PROTOCOL=chat_completions`; verify `/responses` and `web_search` support and the tool-call limit range. |
 | Cherry Studio reports `-32001` | Set the MCP tool timeout to 300 seconds and keep `WEB_SEARCH_TOTAL_TIMEOUT` at 270 seconds or lower. |
 | Fetch or map configuration error | Configure Tavily and ensure `TAVILY_ENABLED` is not `false`. |
 | Client displays partial success | Inspect `status="partial_success"`, `error_detail`, and the component compatibility field; the usable result is still available. |
