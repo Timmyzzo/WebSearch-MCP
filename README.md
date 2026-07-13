@@ -1,5 +1,3 @@
-![WebSearch MCP](./images/title.png)
-
 <div align="center">
 
 [English](./docs/README_EN.md) | 简体中文
