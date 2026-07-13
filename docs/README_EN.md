@@ -27,7 +27,7 @@ WebSearch MCP combines Grok's AI-powered web search with Tavily search, page ext
 
 ```text
 MCP Client --stdio--> WebSearch MCP
-                       |-- web_search --> Grok Chat/Responses + optional Tavily sources
+                       |-- web_search --> Grok /v1/chat/completions + optional Tavily sources
                        |-- get_sources --> cached search sources
                        |-- web_fetch  --> Tavily Extract
                        `-- web_map    --> Tavily Map
@@ -39,7 +39,7 @@ MCP Client --stdio--> WebSearch MCP
 | --- | --- |
 | Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
 | Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
-| Auditable protocol | Optional xAI Responses explicitly invokes `web_search` and parses citations, annotations, and search traces; Chat remains the compatibility default. |
+| Single upstream protocol | Calls only OpenAI-compatible `/v1/chat/completions`; Responses and automatic protocol switching are disabled. |
 | Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
 | Explainable reliability | A roughly 270-second server budget, process-wide Grok concurrency of two, one request per Tavily key, circuits, `Retry-After`, and complete-stream validation. |
 | Stable compatibility | Standard MCP stdio, fixed tool schemas, and three stable outcome states. |
@@ -55,7 +55,7 @@ Typical uses include retrieving current official documentation, producing answer
 - P4 unified response protocol: complete.
 - P5 search prompt and quality work: complete.
 - Search timeout and concurrency governance: automated implementation complete; Cherry Studio acceptance at a 300-second outer timeout remains.
-- External code audit, optional Responses support, and bounded runtime caches: complete.
+- External code audit and bounded runtime caches: complete; runtime traffic is Chat Completions only.
 - Next: P6 real cross-client acceptance testing.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
@@ -119,8 +119,6 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model. |
 | `GROK_MAX_CONCURRENCY` | No | `2` | Maximum concurrent Grok `/chat/completions` requests in one MCP process; the safety ceiling is two. |
 | `WEB_SEARCH_TOTAL_TIMEOUT` | No | `270` | Total server-side wall-clock budget for one `web_search`, in seconds. |
-| `GROK_API_PROTOCOL` | No | `chat_completions` | Grok request protocol; set `responses` to invoke server-side `web_search` explicitly. |
-| `GROK_RESPONSES_MAX_TOOL_CALLS` | No | `16` | Maximum server-side tool calls for one Responses request; range 7–32. |
 | `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
@@ -164,7 +162,7 @@ These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguo
 
 When `extra_sources>0`, Tavily first supplies structured URL, title, and snippet candidates. Grok then combines those leads with its own web search for verification and final synthesis. Candidates remain untrusted evidence. A Tavily failure still permits a Grok `partial_success`, while Tavily can never replace a failed Grok answer.
 
-`GROK_API_PROTOCOL=chat_completions` remains the default, so relays that expose only `/chat/completions` keep working. With `responses`, the server uses non-streaming `/responses` plus explicit `web_search`; only `status=completed` with a non-empty answer succeeds. Structured citations, inline annotations, and search/open-page URLs enter `get_sources`. Requests always use `store=false` to avoid xAI's default request/response retention. Availability still depends on the configured endpoint and model.
+The upstream protocol is fixed to streaming Chat Completions. The server does not read a protocol-selection variable, call `/responses`, or switch endpoints after a failure; a relay only needs `/v1/chat/completions` and `/v1/models`.
 
 The general source hierarchy is: official documentation/standards/laws/original data/papers and systematic reviews; authoritative institutions and maintainers; fact-checked professional media; professional practice; then blogs, forums, and social-media leads. High-tier sources support key conclusions, repeated syndication is not independent evidence, and insufficient evidence is stated explicitly.
 
@@ -264,7 +262,7 @@ Other tool examples:
 
 ## Grok protocols and one strong model with up to five real attempts
 
-Chat Completions is the compatibility default, while Responses is an optional auditable path. Both protocols share the same model, concurrency, total budget, error classification, and real-attempt accounting. The service never switches protocols after a failure. OpenRouter keeps the `:online` compatibility suffix in Chat mode; Responses uses `openrouter:web_search` without that suffix.
+The service uses streaming Chat Completions only. OpenRouter keeps the compatible `:online` model suffix, and every retry stays on the same `/v1/chat/completions` endpoint and current model.
 
 Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay account-pool failures are retried with jittered exponential backoff, up to five real requests by default.
 
@@ -308,7 +306,6 @@ Source sessions live only in the current MCP process, with at most 256 entries a
 - For corporate certificate errors, add `--native-tls` before `--from` in the `uvx` arguments.
 - Configuration diagnostics mask API keys. Never commit real keys or paste them into issues and screenshots.
 - If Cherry Studio still reports `-32001`, set its MCP tool timeout to 300 seconds and keep the server budget below it; the default is 270 seconds. The 300-second value is a safety ceiling, not a performance goal.
-- If Responses returns 400/422 or reports an unavailable tool, restore `GROK_API_PROTOCOL=chat_completions`, then verify that the endpoint exposes `/responses`, the model supports server-side `web_search`, and `GROK_RESPONSES_MAX_TOOL_CALLS` is between 7 and 32.
 
 ## Development
 
