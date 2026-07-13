@@ -65,7 +65,6 @@ _AUTH_PATTERNS = (
     "密钥无效",
 )
 
-_SINGLE_ATTEMPT_READ_TIMEOUT = 120.0
 _MIN_NEW_ATTEMPT_BUDGET = 1.0
 
 
@@ -457,9 +456,10 @@ class GrokClient:
         )
 
     def _retry_delay(self, attempt_number: int, retry_after: float | None) -> float:
+        exponent = min(max(0, attempt_number - 1), 60)
         base = min(
             float(config.retry_max_wait),
-            float(config.retry_multiplier) * (2 ** (attempt_number - 1)),
+            float(config.retry_multiplier) * (2**exponent),
         )
         delay = base * (0.5 + 0.5 * min(1.0, max(0.0, self._random())))
         return max(delay, retry_after or 0.0)
@@ -474,7 +474,7 @@ class GrokClient:
                 json=payload,
                 timeout=httpx.Timeout(
                     connect=min(6.0, timeout),
-                    read=min(_SINGLE_ATTEMPT_READ_TIMEOUT, timeout),
+                    read=min(config.grok_single_attempt_timeout, timeout),
                     write=min(10.0, timeout),
                     pool=timeout,
                 ),
@@ -619,6 +619,21 @@ class GrokClient:
                 action="fatal",
                 http_status=status,
                 upstream_code=upstream_code,
+            )
+        retryable_codes = set(config.grok_retryable_upstream_codes)
+        if any(
+            value.casefold() in retryable_codes
+            for value in (code, error_type)
+            if value
+        ):
+            return _AttemptFailure(
+                "rate_limited"
+                if any("rate_limit" in value.casefold() for value in (code, error_type) if value)
+                else "upstream_unavailable",
+                action="retry",
+                http_status=status,
+                upstream_code=upstream_code,
+                retry_after=self._parse_retry_after(headers),
             )
         if status == 408 or status == 429 or 500 <= status < 600:
             return _AttemptFailure(

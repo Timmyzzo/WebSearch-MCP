@@ -27,9 +27,9 @@ def test_grok_model_legacy_and_empty_values(monkeypatch, tmp_path):
 
 
 def test_grok_model_attempts_default_and_validation(monkeypatch):
-    assert config.grok_model_max_attempts == 5
-    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "7")
-    assert config.grok_model_max_attempts == 7
+    assert config.grok_model_max_attempts == 12
+    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "20")
+    assert config.grok_model_max_attempts == 20
     monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "0")
     with pytest.raises(ValueError, match="大于或等于 1"):
         _ = config.grok_model_max_attempts
@@ -37,23 +37,57 @@ def test_grok_model_attempts_default_and_validation(monkeypatch):
 
 def test_timeout_and_concurrency_defaults_and_safety_bounds(monkeypatch):
     assert config.web_search_total_timeout == 270
+    assert config.grok_single_attempt_timeout == 120
     assert config.grok_max_concurrency == 2
     assert config.tavily_per_key_max_concurrency == 1
 
     monkeypatch.setenv("WEB_SEARCH_TOTAL_TIMEOUT", "240.5")
+    monkeypatch.setenv("GROK_SINGLE_ATTEMPT_TIMEOUT", "45.5")
     monkeypatch.setenv("GROK_MAX_CONCURRENCY", "1")
     assert config.web_search_total_timeout == 240.5
+    assert config.grok_single_attempt_timeout == 45.5
     assert config.grok_max_concurrency == 1
 
     monkeypatch.setenv("WEB_SEARCH_TOTAL_TIMEOUT", "0")
     with pytest.raises(ValueError, match="大于 0"):
         _ = config.web_search_total_timeout
+    monkeypatch.setenv("GROK_SINGLE_ATTEMPT_TIMEOUT", "0")
+    with pytest.raises(ValueError, match="大于 0"):
+        _ = config.grok_single_attempt_timeout
     monkeypatch.setenv("GROK_MAX_CONCURRENCY", "3")
     with pytest.raises(ValueError, match="1 或 2"):
         _ = config.grok_max_concurrency
     monkeypatch.setenv("TAVILY_PER_KEY_MAX_CONCURRENCY", "2")
     with pytest.raises(ValueError, match="必须为 1"):
         _ = config.tavily_per_key_max_concurrency
+
+
+def test_grok_retry_strategy_is_configurable(monkeypatch):
+    assert config.retry_multiplier == 1
+    assert config.retry_max_wait == 10
+    assert "rate_limit_exceeded" in config.grok_retryable_upstream_codes
+    assert "upstream_error" in config.grok_retryable_upstream_codes
+
+    monkeypatch.setenv("GROK_RETRY_MULTIPLIER", "0.25")
+    monkeypatch.setenv("GROK_RETRY_MAX_WAIT", "3.5")
+    monkeypatch.setenv(
+        "GROK_RETRYABLE_UPSTREAM_CODES",
+        "capacity_exhausted; provider_busy\nrelay_overloaded",
+    )
+    assert config.retry_multiplier == 0.25
+    assert config.retry_max_wait == 3.5
+    assert config.grok_retryable_upstream_codes == (
+        "capacity_exhausted",
+        "provider_busy",
+        "relay_overloaded",
+    )
+
+    monkeypatch.setenv("GROK_RETRY_MULTIPLIER", "-1")
+    with pytest.raises(ValueError, match="大于或等于 0"):
+        _ = config.retry_multiplier
+    monkeypatch.setenv("GROK_RETRY_MAX_WAIT", "invalid")
+    with pytest.raises(ValueError, match="大于或等于 0"):
+        _ = config.retry_max_wait
 
 
 def test_openrouter_online_suffix_is_used_for_chat_completions(monkeypatch):
@@ -101,9 +135,13 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert set(info).issuperset({"GROK_API_URL", "GROK_API_KEY", "TAVILY_API_URL"})
     assert info["GROK_PRIMARY_MODEL"] == "grok-4-fast"
     assert info["GROK_FALLBACK_MODEL"] == "已弃用（单模型模式）"
-    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 5
+    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 12
     assert info["GROK_MAX_CONCURRENCY"] == 2
     assert info["WEB_SEARCH_TOTAL_TIMEOUT"] == 270
+    assert info["GROK_SINGLE_ATTEMPT_TIMEOUT"] == 120
+    assert info["GROK_RETRY_MULTIPLIER"] == 1
+    assert info["GROK_RETRY_MAX_WAIT"] == 10
+    assert "rate_limit_exceeded" in info["GROK_RETRYABLE_UPSTREAM_CODES"]
     assert info["TAVILY_PER_KEY_MAX_CONCURRENCY"] == 1
     assert all("fire" not in key.lower() for key in info)
 

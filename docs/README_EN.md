@@ -38,7 +38,7 @@ MCP Client --stdio--> WebSearch MCP
 | Capability | Observable behavior |
 | --- | --- |
 | Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
-| Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
+| Strong-model first | One user-selected Grok model is used throughout, with up to twelve real attempts by default. |
 | Single upstream protocol | Calls only OpenAI-compatible `/v1/chat/completions`; Responses and automatic protocol switching are disabled. |
 | Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
 | Explainable reliability | A roughly 270-second server budget, process-wide Grok concurrency of two, one request per Tavily key, circuits, `Retry-After`, and complete-stream validation. |
@@ -116,9 +116,13 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_API_URL` | Yes | - | OpenAI-compatible API root with `/chat/completions` and `/models`. |
 | `GROK_API_KEY` | Yes | - | Grok API key. |
 | `GROK_PRIMARY_MODEL` | No | See below | Strong model selected by the user for every Grok search. |
-| `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model. |
+| `GROK_MODEL_MAX_ATTEMPTS` | No | `12` | Maximum real requests for recoverable failures on the current model; any positive integer is accepted. |
 | `GROK_MAX_CONCURRENCY` | No | `2` | Maximum concurrent Grok `/chat/completions` requests in one MCP process; the safety ceiling is two. |
 | `WEB_SEARCH_TOTAL_TIMEOUT` | No | `270` | Total server-side wall-clock budget for one `web_search`, in seconds. |
+| `GROK_SINGLE_ATTEMPT_TIMEOUT` | No | `120` | Per-attempt stream read limit, clipped to the remaining total budget. |
+| `GROK_RETRY_MULTIPLIER` | No | `1` | Initial exponential-backoff multiplier; accepts non-negative numbers. |
+| `GROK_RETRY_MAX_WAIT` | No | `10` | Maximum delay for one backoff; accepts non-negative numbers. |
+| `GROK_RETRYABLE_UPSTREAM_CODES` | No | See below | Retryable codes embedded in HTTP 200 error bodies; comma, semicolon, or newline separated. |
 | `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
@@ -132,12 +136,12 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_DEBUG` | No | `false` | Enables debug logging. |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level. |
 | `GROK_LOG_DIR` | No | `logs` | Log directory. |
-| `GROK_RETRY_MULTIPLIER` | No | `1` | Exponential backoff multiplier. |
-| `GROK_RETRY_MAX_WAIT` | No | `10` | Maximum backoff in seconds. |
 
 With Grok alone, `web_search` remains available. Setting `TAVILY_ENABLED=false` disables Tavily even when keys are present.
 
 Model precedence is: a model selected by `switch_model` in the current process, non-empty `GROK_PRIMARY_MODEL`, non-empty `GROK_MODEL`, the persisted model, then `grok-4-fast`. Whitespace-only values are treated as unset. The server does not downgrade to a weaker fallback model.
+
+The default HTTP-200 retry codes are `rate_limit`, `rate_limit_exceeded`, `too_many_requests`, `upstream_error`, `server_error`, `service_unavailable`, `temporarily_unavailable`, `overloaded`, `overloaded_error`, and `internal_error`. Setting `GROK_RETRYABLE_UPSTREAM_CODES` replaces this list, so retain any defaults that should continue to retry when adding provider-specific codes.
 
 ## Tool overview
 
@@ -179,7 +183,7 @@ Queries such as “latest,” “current,” “today,” “current version,”
 
 Set Cherry Studio's outer MCP tool timeout to 300 seconds. This is a safety ceiling that prevents an early bare `-32001`, not a latency target. Each `web_search` uses `WEB_SEARCH_TOTAL_TIMEOUT=270` by default and actively returns success, partial success, or a structured error within that server-side wall-clock budget, leaving roughly 30 seconds for MCP serialization, scheduling, transport, and client-side variance.
 
-The Grok read limit remains 120 seconds per real attempt, but an attempt receives the smaller of 120 seconds and the remaining total budget. `GROK_MODEL_MAX_ATTEMPTS=5` means at most five real HTTP requests, not five guaranteed requests. Grok-slot waits, Tavily-key waits, HTTP and stream time, exponential backoff, and `Retry-After` all consume the same total budget. A new retry is not started when the remaining budget is no longer reasonable for another attempt.
+The per-attempt Grok read limit is controlled by `GROK_SINGLE_ATTEMPT_TIMEOUT`, defaulting to 120 seconds, and is clipped to the remaining total budget. `GROK_MODEL_MAX_ATTEMPTS=12` means at most twelve real HTTP requests, not twelve guaranteed requests. Grok-slot waits, Tavily-key waits, HTTP and stream time, exponential backoff, and `Retry-After` all consume the same total budget. A new retry is not started when the remaining budget is no longer reasonable for another attempt.
 
 One MCP process runs at most two Grok HTTP requests by default. Tavily Search, Extract, and Map share key health and occupancy, with at most one real request on each key; distinct healthy keys can run concurrently. Success, failure, cancellation, timeout, and interrupted-stream paths release their slots, and every retry must queue again. Diagnostics distinguish `max_attempts_exhausted`, `non_retryable_error`, `total_budget_exhausted`, and `concurrency_queue_timeout`, with configured/actual attempts, elapsed time, budget, and queue wait.
 
@@ -260,11 +264,11 @@ Other tool examples:
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"The search plan is incomplete","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## Grok protocols and one strong model with up to five real attempts
+## Grok protocol and one strong model with up to twelve real attempts
 
 The service uses streaming Chat Completions only. OpenRouter keeps the compatible `:online` model suffix, and every retry stays on the same `/v1/chat/completions` endpoint and current model.
 
-Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay account-pool failures are retried with jittered exponential backoff, up to five real requests by default.
+Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, recognizable relay account-pool failures, and configured temporary codes inside HTTP 200 error bodies are retried with jittered exponential backoff, up to twelve real requests by default.
 
 Retries cannot exceed `WEB_SEARCH_TOTAL_TIMEOUT` or bypass `GROK_MAX_CONCURRENCY`. Authentication, request, missing-model, and permission errors say that execution stopped early because the failure was not retryable. Only a call that really reaches the configured limit reports exhausted maximum attempts. Total-budget and concurrency-queue exhaustion have distinct structured reasons.
 

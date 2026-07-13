@@ -16,6 +16,18 @@ class Config:
         '"env":{"GROK_API_URL":"your-api-url","GROK_API_KEY":"your-api-key"}}\''
     )
     _DEFAULT_MODEL = "grok-4-fast"
+    _DEFAULT_RETRYABLE_UPSTREAM_CODES = (
+        "rate_limit",
+        "rate_limit_exceeded",
+        "too_many_requests",
+        "upstream_error",
+        "server_error",
+        "service_unavailable",
+        "temporarily_unavailable",
+        "overloaded",
+        "overloaded_error",
+        "internal_error",
+    )
 
     def __new__(cls):
         if cls._instance is None:
@@ -62,7 +74,7 @@ class Config:
     def grok_model_max_attempts(self) -> int:
         raw = os.getenv("GROK_MODEL_MAX_ATTEMPTS", "").strip()
         if not raw:
-            return 5
+            return 12
         try:
             value = int(raw)
         except ValueError as exc:
@@ -95,11 +107,46 @@ class Config:
 
     @property
     def retry_multiplier(self) -> float:
-        return float(os.getenv("GROK_RETRY_MULTIPLIER", "1"))
+        raw = os.getenv("GROK_RETRY_MULTIPLIER", "1").strip()
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("GROK_RETRY_MULTIPLIER 必须是大于或等于 0 的秒数") from exc
+        if value < 0:
+            raise ValueError("GROK_RETRY_MULTIPLIER 必须大于或等于 0")
+        return value
 
     @property
-    def retry_max_wait(self) -> int:
-        return int(os.getenv("GROK_RETRY_MAX_WAIT", "10"))
+    def retry_max_wait(self) -> float:
+        raw = os.getenv("GROK_RETRY_MAX_WAIT", "10").strip()
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("GROK_RETRY_MAX_WAIT 必须是大于或等于 0 的秒数") from exc
+        if value < 0:
+            raise ValueError("GROK_RETRY_MAX_WAIT 必须大于或等于 0")
+        return value
+
+    @property
+    def grok_single_attempt_timeout(self) -> float:
+        raw = os.getenv("GROK_SINGLE_ATTEMPT_TIMEOUT", "120").strip()
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("GROK_SINGLE_ATTEMPT_TIMEOUT 必须是大于 0 的秒数") from exc
+        if value <= 0:
+            raise ValueError("GROK_SINGLE_ATTEMPT_TIMEOUT 必须大于 0")
+        return value
+
+    @property
+    def grok_retryable_upstream_codes(self) -> tuple[str, ...]:
+        raw = os.getenv("GROK_RETRYABLE_UPSTREAM_CODES", "").strip()
+        values = (
+            self._split_env_list(raw)
+            if raw
+            else list(self._DEFAULT_RETRYABLE_UPSTREAM_CODES)
+        )
+        return tuple(dict.fromkeys(value.casefold() for value in values))
 
     @property
     def grok_api_url(self) -> str:
@@ -128,10 +175,14 @@ class Config:
         return os.getenv("TAVILY_API_URL", "https://api.tavily.com")
 
     @staticmethod
-    def _split_api_keys(value: str | None) -> list[str]:
+    def _split_env_list(value: str | None) -> list[str]:
         if not value:
             return []
         return [key.strip() for key in re.split(r"[,;\r\n]+", value) if key.strip()]
+
+    @classmethod
+    def _split_api_keys(cls, value: str | None) -> list[str]:
+        return cls._split_env_list(value)
 
     @property
     def tavily_api_keys(self) -> list[str]:
@@ -310,6 +361,10 @@ class Config:
             "GROK_MODEL_MAX_ATTEMPTS": max_attempts,
             "GROK_MAX_CONCURRENCY": self.grok_max_concurrency,
             "WEB_SEARCH_TOTAL_TIMEOUT": self.web_search_total_timeout,
+            "GROK_SINGLE_ATTEMPT_TIMEOUT": self.grok_single_attempt_timeout,
+            "GROK_RETRY_MULTIPLIER": self.retry_multiplier,
+            "GROK_RETRY_MAX_WAIT": self.retry_max_wait,
+            "GROK_RETRYABLE_UPSTREAM_CODES": list(self.grok_retryable_upstream_codes),
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,

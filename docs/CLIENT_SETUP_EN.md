@@ -20,16 +20,22 @@ Minimum environment:
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
 GROK_PRIMARY_MODEL=grok-4-fast
-GROK_MODEL_MAX_ATTEMPTS=5
+GROK_MODEL_MAX_ATTEMPTS=12
 GROK_MAX_CONCURRENCY=2
 WEB_SEARCH_TOTAL_TIMEOUT=270
+GROK_SINGLE_ATTEMPT_TIMEOUT=120
+GROK_RETRY_MULTIPLIER=1
+GROK_RETRY_MAX_WAIT=10
+GROK_RETRYABLE_UPSTREAM_CODES=rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error
 ```
 
 Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
 
-If `GROK_PRIMARY_MODEL` is empty or unset, the compatibility variable `GROK_MODEL` is used before the persisted setting and `grok-4-fast`. The service uses that one strong model without automatic fallback. Recoverable failures receive at most five real requests by default.
+If `GROK_PRIMARY_MODEL` is empty or unset, the compatibility variable `GROK_MODEL` is used before the persisted setting and `grok-4-fast`. The service uses that one strong model without automatic fallback. Recoverable failures receive at most twelve real requests by default.
 
 The upstream protocol is fixed to streaming `/v1/chat/completions`; `/responses` and runtime protocol switching are not supported. `GROK_API_URL` should normally end in `/v1` and also expose `/models`.
+
+Some relays wrap temporary failures in HTTP 200 responses. `GROK_RETRYABLE_UPSTREAM_CODES` accepts comma, semicolon, or newline separators and replaces the default list; keep any default codes that still need retries when adding provider-specific codes. `GROK_SINGLE_ATTEMPT_TIMEOUT`, `GROK_RETRY_MULTIPLIER`, and `GROK_RETRY_MAX_WAIT` control the per-attempt read limit and exponential backoff.
 
 Optional reliability settings are `TAVILY_PER_KEY_MAX_CONCURRENCY=1`, `TAVILY_KEY_COOLDOWN=30`, `TAVILY_QUOTA_COOLDOWN=3600`, `TAVILY_SERVICE_FAILURE_THRESHOLD=2`, and `TAVILY_SERVICE_COOLDOWN=30`. The Grok safety ceiling is two concurrent requests, and Tavily currently requires one request per key. The defaults are appropriate for most setups.
 
@@ -51,9 +57,13 @@ Add a stdio MCP server:
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
         "GROK_PRIMARY_MODEL": "grok-4-fast",
-        "GROK_MODEL_MAX_ATTEMPTS": "5",
+        "GROK_MODEL_MAX_ATTEMPTS": "12",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
+        "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
+        "GROK_RETRY_MULTIPLIER": "1",
+        "GROK_RETRY_MAX_WAIT": "10",
+        "GROK_RETRYABLE_UPSTREAM_CODES": "rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error",
         "TAVILY_PER_KEY_MAX_CONCURRENCY": "1",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
@@ -84,7 +94,15 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "TAVILY_API_KEY": "tvly-your-tavily-key"
+    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MAX_CONCURRENCY": "2",
+    "WEB_SEARCH_TOTAL_TIMEOUT": "270",
+    "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
+    "GROK_RETRY_MULTIPLIER": "1",
+    "GROK_RETRY_MAX_WAIT": "10",
+    "GROK_RETRYABLE_UPSTREAM_CODES": "rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error",
+    "TAVILY_PER_KEY_MAX_CONCURRENCY": "1",
+    "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
   }
 }'
 ```
@@ -107,7 +125,15 @@ $config = @'
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "TAVILY_API_KEY": "tvly-your-tavily-key"
+    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MAX_CONCURRENCY": "2",
+    "WEB_SEARCH_TOTAL_TIMEOUT": "270",
+    "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
+    "GROK_RETRY_MULTIPLIER": "1",
+    "GROK_RETRY_MAX_WAIT": "10",
+    "GROK_RETRYABLE_UPSTREAM_CODES": "rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error",
+    "TAVILY_PER_KEY_MAX_CONCURRENCY": "1",
+    "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
   }
 }
 '@
@@ -141,9 +167,13 @@ tool_timeout_sec = 300
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
 GROK_PRIMARY_MODEL = "grok-4-fast"
-GROK_MODEL_MAX_ATTEMPTS = "5"
+GROK_MODEL_MAX_ATTEMPTS = "12"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
+GROK_SINGLE_ATTEMPT_TIMEOUT = "120"
+GROK_RETRY_MULTIPLIER = "1"
+GROK_RETRY_MAX_WAIT = "10"
+GROK_RETRYABLE_UPSTREAM_CODES = "rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error"
 TAVILY_PER_KEY_MAX_CONCURRENCY = "1"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
@@ -178,7 +208,7 @@ Proxy settings such as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` can be suppli
 
 The canonical error object is `error_detail`, with at least `code`, `message`, `service`, and `retryable`; it also includes `http_status`, `upstream_code`, and redacted `diagnostics` when available. Legacy `error`, `partial`, `tavily_error`, and `grok_error` fields remain available.
 
-Keep the timeout hierarchy as: 300-second client tool timeout > 270-second server `web_search` budget > 120-second Grok read limit per attempt. Maximum attempts, concurrency waits, HTTP/stream time, backoff, and `Retry-After` share the same 270-second budget, so “up to five” does not guarantee five requests. One process permits at most two Grok requests by default. Tavily Search, Extract, and Map share a one-request-per-key limit, while distinct healthy keys may run concurrently.
+Keep the timeout hierarchy as: 300-second client tool timeout > 270-second server `web_search` budget > 120-second Grok read limit per attempt. Maximum attempts, concurrency waits, HTTP/stream time, backoff, and `Retry-After` share the same 270-second budget, so “up to twelve” does not guarantee twelve requests. One process permits at most two Grok requests by default. Tavily Search, Extract, and Map share a one-request-per-key limit, while distinct healthy keys may run concurrently.
 
 P5 adds no client parameters or response fields. Every `web_search` covers at least five independent perspectives and deep-dives into two. Normal requests usually use 7–12 retrieval actions; ambiguous entities, current events, comparisons, high-risk, niche, and contested questions usually use 10–16. Queries expand across their native language and relevant entity languages. With `extra_sources>0`, Tavily candidates enter Grok's final synthesis.
 
@@ -192,7 +222,7 @@ Source sessions retain at most 256 entries and expire after one hour. Successful
 | Startup timeout | The first run may download dependencies; increase the startup timeout. |
 | Invalid JSON | Check quotes and trailing commas; use a PowerShell here-string on Windows. |
 | Grok connection failure | Verify the API root and `/models` support. |
-| The Grok model ultimately fails | Inspect `error_detail` first, then the compatible `grok_error` attempt count and classification; authentication, request, missing-model, and permission errors stop immediately. |
+| The Grok model ultimately fails | Inspect `error_detail` and `grok_error`; ensure temporary provider codes are listed in `GROK_RETRYABLE_UPSTREAM_CODES`, then check the attempt count and total budget. Authentication, request, missing-model, and permission errors still stop immediately. |
 | Cherry Studio reports `-32001` | Set the MCP tool timeout to 300 seconds and keep `WEB_SEARCH_TOTAL_TIMEOUT` at 270 seconds or lower. |
 | Fetch or map configuration error | Configure Tavily and ensure `TAVILY_ENABLED` is not `false`. |
 | Client displays partial success | Inspect `status="partial_success"`, `error_detail`, and the component compatibility field; the usable result is still available. |
