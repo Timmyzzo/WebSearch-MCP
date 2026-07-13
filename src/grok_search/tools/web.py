@@ -145,10 +145,35 @@ def _extra_results_to_sources(results: list[TavilySearchResult]) -> list[dict[st
     return sources
 
 
+def _tavily_results_to_evidence(
+    results: list[TavilySearchResult],
+    *,
+    max_items: int = 12,
+    max_total_chars: int = 12000,
+) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    total_chars = 0
+    for result in results[:max_items]:
+        url = result.url.strip()
+        if not url:
+            continue
+        item = {"url": url[:2000], "provider": "tavily"}
+        if result.title.strip():
+            item["title"] = result.title.strip()[:300]
+        if result.content.strip():
+            item["snippet"] = result.content.strip()[:1200]
+        item_size = sum(len(value) for value in item.values())
+        if evidence and total_chars + item_size > max_total_chars:
+            break
+        evidence.append(item)
+        total_chars += item_size
+    return evidence
+
+
 @mcp.tool(
     name="web_search",
     description=(
-        "Search the web with Grok and optionally add structured Tavily sources. "
+        "Research the web with Grok and optionally use structured Tavily evidence. "
         "Returns unified status/error_detail fields plus a session_id and answer content."
     ),
     meta={"version": "3.0.0"},
@@ -165,7 +190,11 @@ async def web_search(
     ] = "",
     extra_sources: Annotated[
         int,
-        Field(description="Additional Tavily source results to cache.", ge=0, le=20),
+        Field(
+            description="Additional Tavily results to feed into evidence synthesis and cache.",
+            ge=0,
+            le=20,
+        ),
     ] = 0,
 ) -> WebSearchResponse:
     session_id = new_session_id()
@@ -228,7 +257,9 @@ async def web_search(
     grok_client = await _get_grok_client(api_url, api_key)
     tavily_count = extra_sources
 
-    async def safe_grok() -> tuple[str | None, GrokErrorDetail | None, ErrorDetail | None]:
+    async def safe_grok(
+        supplemental_sources: list[dict[str, str]],
+    ) -> tuple[str | None, GrokErrorDetail | None, ErrorDetail | None]:
         try:
             result = await grok_client.search(
                 query,
@@ -236,6 +267,7 @@ async def web_search(
                 primary_model=effective_model,
                 fallback_model=configured_fallback,
                 max_attempts=max_attempts,
+                supplemental_sources=supplemental_sources,
             )
             return result, None, None
         except GrokClientError as exc:
@@ -256,9 +288,10 @@ async def web_search(
         except Exception as exc:
             return [], None, _unexpected_error("tavily", exc)
 
-    grok_outcome, tavily_outcome = await asyncio.gather(safe_grok(), safe_tavily())
-    grok_result, grok_error, grok_error_detail = grok_outcome
+    tavily_outcome = await safe_tavily()
     tavily_results, tavily_error, tavily_error_detail = tavily_outcome
+    grok_outcome = await safe_grok(_tavily_results_to_evidence(tavily_results))
+    grok_result, grok_error, grok_error_detail = grok_outcome
     if grok_error_detail is not None:
         if tavily_error_detail is not None:
             grok_error_detail.diagnostics["component_errors"] = {

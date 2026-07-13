@@ -177,7 +177,7 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 
 所有工具的规范错误对象都位于 `error_detail`，至少包含 `code`、`message`、`service` 和 `retryable`；存在时还包含 `http_status`、`upstream_code` 与脱敏 `diagnostics`。旧字段 `error`、`partial`、`tavily_error`、`grok_error` 仍保留兼容。
 
-P5 不增加客户端参数或返回字段。`web_search` 会在服务内部根据问题复杂度、时效和风险选择有界的快速、标准或深度搜索策略；“最新/当前”等查询使用服务运行时的实际日期与时区。客户端仍只需传递原有 `query`，以及可选的 `platform`、`model` 和 `extra_sources`。
+P5 不增加客户端参数或返回字段。`web_search` 默认执行有界深度研究，仅明确低歧义事实和单一官方文档走短路径；人物、组织、履历和公开记录会扩展别名并表达置信度。“最新/当前”等查询使用服务运行时的实际日期与时区。设置 `extra_sources>0` 后，Tavily 候选证据会进入 Grok 的最终综合。客户端仍只需传递原有参数。
 
 ## 7. 常见故障
 

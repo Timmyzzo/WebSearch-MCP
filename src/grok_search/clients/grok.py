@@ -225,6 +225,7 @@ class GrokClient:
         primary_model: str | None = None,
         fallback_model: str | None = None,
         max_attempts: int | None = None,
+        supplemental_sources: list[dict[str, str]] | None = None,
     ) -> str:
         primary = primary_model or self.model
         if not primary:
@@ -237,7 +238,11 @@ class GrokClient:
         reported_fallback = fallback_model
         fallback = fallback_model if fallback_model and fallback_model != primary else None
 
-        messages = build_search_messages(query, platform)
+        messages = build_search_messages(
+            query,
+            platform,
+            supplemental_sources=supplemental_sources,
+        )
         await log_info(ctx, "Prepared bounded search request", config.debug_enabled)
 
         counts = {primary: 0}

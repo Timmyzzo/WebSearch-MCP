@@ -87,6 +87,33 @@ async def test_web_search_merges_grok_and_tavily_sources(monkeypatch):
     assert [source.provider for source in sources.sources] == [None, "tavily"]
 
 
+async def test_web_search_feeds_tavily_candidates_into_grok_synthesis(monkeypatch):
+    captured = {}
+
+    class CapturingGrokClient:
+        async def search(self, query, platform="", **kwargs):
+            captured["supplemental_sources"] = kwargs["supplemental_sources"]
+            return "Synthesized answer"
+
+    monkeypatch.setenv("GROK_API_URL", "https://grok.example/v1")
+    monkeypatch.setenv("GROK_API_KEY", "fake-grok-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "fake-tavily-key")
+    monkeypatch.setattr(web_tools, "_new_grok_client", lambda *args: CapturingGrokClient())
+    monkeypatch.setattr(web_tools, "_new_tavily_client", lambda: FakeTavilyClient())
+
+    result = await web_tools.web_search("ambiguous public profile", extra_sources=3)
+
+    assert result.status == "success"
+    assert captured["supplemental_sources"] == [
+        {
+            "url": "https://example.com/supplement",
+            "provider": "tavily",
+            "title": "Supplement",
+            "snippet": "Extra context",
+        }
+    ]
+
+
 async def test_web_fetch_and_map_return_structured_models(monkeypatch):
     monkeypatch.setattr(web_tools, "_new_tavily_client", lambda: FakeTavilyClient())
 

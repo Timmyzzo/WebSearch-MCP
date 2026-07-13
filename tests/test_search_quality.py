@@ -27,11 +27,24 @@ def test_simple_fact_uses_short_bounded_strategy_without_fixed_long_template():
     assert classify_search_query("What is the capital of France?").depth == "fast"
 
 
-def test_single_official_document_query_uses_fast_primary_source_path():
+def test_single_official_document_query_uses_short_primary_source_path():
     profile = classify_search_query("Python pathlib 的官方文档")
-    assert profile.depth == "fast"
+    assert profile.depth == "standard"
     assert profile.primary_source_focus is True
     assert "single_official_document" in profile.categories
+
+
+def test_ambiguous_entity_and_record_queries_default_to_broad_research():
+    identity = classify_search_query("Yan233th 是谁？")
+    records = classify_search_query("请查一下他的算法竞赛获奖记录")
+
+    for profile in (identity, records):
+        assert profile.depth == "deep"
+        assert profile.query_expansion is True
+        assert profile.confidence_calibration is True
+        assert "entity_or_record_research" in profile.categories
+    assert "Lack of one direct identity-binding page" in SEARCH_PROMPT
+    assert "approximate percentage or range" in NORMALIZED_PROMPT
 
 
 def test_current_query_carries_runtime_date_and_freshness_requirements():
