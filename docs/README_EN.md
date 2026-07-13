@@ -39,7 +39,7 @@ MCP Client --stdio--> WebSearch MCP
 
 | Capability | Observable behavior |
 | --- | --- |
-| Deep by default | Every search uses bounded deep research, usually 4–8 multi-angle searches. |
+| Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
 | Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
 | Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
 | Explainable reliability | Multi-key Tavily circuits, `Retry-After`, and complete-stream validation. |
@@ -150,7 +150,9 @@ Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query
 
 ## Search quality and deep-first execution
 
-Every `web_search` uses a bounded `deep` profile, usually 4–8 multi-angle searches, and stops when key claims converge. Simple facts and single official-document requests still receive deep verification, while the final answer remains appropriately concise.
+Every `web_search` uses a bounded `deep` profile: search at least five genuinely different perspectives, then investigate at least two of the most relevant or uncertain perspectives further. Normal requests therefore use roughly 7–12 retrieval actions; ambiguous entities, current events, comparisons, high-risk, niche, and contested questions usually use 10–16. Simple facts and single official-document requests keep the same floor while their final answers remain concise.
+
+This floor matches the validated reference project's requirement of 5+ breadth perspectives and at least two depth investigations. WebSearch MCP adds deterministic budgets, native/entity-language searches, source hierarchy, counterevidence, and Tavily evidence synthesis. Minor wording variants do not count as separate perspectives, and source quantity never replaces quality.
 
 These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguous-entity research expands aliases, accounts, organizations, teams, collaborators, events, and date ranges, then separates directly confirmed, strongly supported, plausible, conflicting, and rejected links with explainable confidence. Missing one direct identity-binding page does not stop the investigation, but inference is not presented as fact. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
 
