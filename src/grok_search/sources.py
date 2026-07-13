@@ -2,8 +2,10 @@ import ast
 import asyncio
 import json
 import re
+import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -46,24 +48,46 @@ def extract_unique_urls(text: str) -> list[str]:
 
 
 class SourcesCache:
-    def __init__(self, max_size: int = 256):
+    def __init__(
+        self,
+        max_size: int = 256,
+        ttl_seconds: float = 3600.0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self._max_size = max_size
+        self._ttl_seconds = max(0.0, ttl_seconds)
+        self._clock = clock
         self._lock = asyncio.Lock()
-        self._cache: OrderedDict[str, list[dict]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
+
+    def _purge_expired_locked(self, now: float) -> None:
+        expired = [
+            session_id
+            for session_id, (created_at, _) in self._cache.items()
+            if now - created_at >= self._ttl_seconds
+        ]
+        for session_id in expired:
+            self._cache.pop(session_id, None)
 
     async def set(self, session_id: str, sources: list[dict]) -> None:
         async with self._lock:
-            self._cache[session_id] = sources
+            now = self._clock()
+            self._purge_expired_locked(now)
+            self._cache[session_id] = (now, sources)
             self._cache.move_to_end(session_id)
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
 
     async def get(self, session_id: str) -> list[dict] | None:
         async with self._lock:
-            sources = self._cache.get(session_id)
-            if sources is None:
+            now = self._clock()
+            self._purge_expired_locked(now)
+            entry = self._cache.get(session_id)
+            if entry is None:
                 return None
             self._cache.move_to_end(session_id)
+            _, sources = entry
             return sources
 
 
@@ -358,6 +382,9 @@ def _normalize_sources(data: Any) -> list[dict]:
             desc = item.get("description") or item.get("snippet") or item.get("content")
             if isinstance(desc, str) and desc.strip():
                 out["description"] = desc.strip()
+            provider = item.get("provider")
+            if isinstance(provider, str) and provider.strip():
+                out["provider"] = provider.strip()
             normalized.append(out)
             continue
 

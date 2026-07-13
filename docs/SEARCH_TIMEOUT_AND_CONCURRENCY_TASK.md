@@ -214,6 +214,8 @@ git diff --check
 - `GROK_MAX_CONCURRENCY=2`：进程级共享 Grok 异步槽位限制器，每次真实重试重新获取槽位。
 - `TAVILY_PER_KEY_MAX_CONCURRENCY=1`：Search、Extract、Map 共用 Key 占用状态；不同健康 Key 可并发，同一 Key 忙碌时优先选择其他 Key，全部忙碌时在工具预算内等待。
 - Grok 与 Tavily 槽位在成功、失败、取消、异常、总预算超时、流中断和熔断切换路径中释放。
+- 可选 `GROK_API_PROTOCOL=responses` 复用同一 Grok 槽位与 270 秒总预算；`status=incomplete`/`in_progress`、空内容和读取超时都按残缺结果处理，不返回或缓存部分答案。
+- Responses 的服务端工具调用由 `GROK_RESPONSES_MAX_TOOL_CALLS` 有界限制（默认 16，范围 7–32），不会因显式 `web_search` 引入无界循环。
 - Grok 终止诊断区分 `max_attempts_exhausted`、`non_retryable_error`、`total_budget_exhausted`、`concurrency_queue_timeout`，并补充 `configured_max_attempts`、`actual_attempts`、`elapsed_ms`、`budget_ms`、`queue_wait_ms` 及最后错误分类。
 - P2 轮询和健康状态、Key/服务级熔断、半开探测、`Retry-After`，P3 单模型/最多五次真实请求/流完整性，以及 P4 三态和 Grok/Tavily 组合语义均保留。
 - 自动化测试覆盖本任务书第 6 节要求，包括超时后 stdio 进程继续调用 `get_config_info`、并发会话/来源/诊断隔离，以及 Grok 失败而 Tavily 成功仍为 `error`。

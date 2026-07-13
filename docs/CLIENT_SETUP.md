@@ -23,6 +23,8 @@ GROK_PRIMARY_MODEL=grok-4-fast
 GROK_MODEL_MAX_ATTEMPTS=5
 GROK_MAX_CONCURRENCY=2
 WEB_SEARCH_TOTAL_TIMEOUT=270
+GROK_API_PROTOCOL=chat_completions
+GROK_RESPONSES_MAX_TOOL_CALLS=16
 ```
 
 如需网页提取、站点映射或额外信源，再配置：
@@ -34,6 +36,8 @@ TAVILY_API_KEY=tvly-your-tavily-key
 多个 Tavily Key 使用 `TAVILY_API_KEYS`，例如 `key-1,key-2,key-3`。
 
 `GROK_PRIMARY_MODEL` 未设置或为空时，会使用兼容变量 `GROK_MODEL`，再回退到持久化配置和 `grok-4-fast`。服务只使用这个模型，不自动降级到备用模型；可恢复故障默认最多真实调用 5 次。
+
+`GROK_API_PROTOCOL` 默认是 `chat_completions`。只有在上游明确支持 `/responses` 和服务端 `web_search` 时才设置为 `responses`；该模式会解析结构化 citations/search trace，并固定发送 `store=false`。`GROK_RESPONSES_MAX_TOOL_CALLS` 范围为 7–32，默认 16，不会形成无界循环。
 
 可选可靠性参数：`TAVILY_PER_KEY_MAX_CONCURRENCY=1`、`TAVILY_KEY_COOLDOWN=30`、`TAVILY_QUOTA_COOLDOWN=3600`、`TAVILY_SERVICE_FAILURE_THRESHOLD=2`、`TAVILY_SERVICE_COOLDOWN=30`。`GROK_MAX_CONCURRENCY` 的安全上限为 2，Tavily 每 Key 并发当前必须为 1，通常保持默认值即可。
 
@@ -58,6 +62,8 @@ TAVILY_API_KEY=tvly-your-tavily-key
         "GROK_MODEL_MAX_ATTEMPTS": "5",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
+        "GROK_API_PROTOCOL": "chat_completions",
+        "GROK_RESPONSES_MAX_TOOL_CALLS": "16",
         "TAVILY_PER_KEY_MAX_CONCURRENCY": "1",
         "TAVILY_API_KEYS": "tvly-key-1,tvly-key-2"
       }
@@ -148,6 +154,8 @@ GROK_PRIMARY_MODEL = "grok-4-fast"
 GROK_MODEL_MAX_ATTEMPTS = "5"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
+GROK_API_PROTOCOL = "chat_completions"
+GROK_RESPONSES_MAX_TOOL_CALLS = "16"
 TAVILY_PER_KEY_MAX_CONCURRENCY = "1"
 TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 ```
@@ -181,12 +189,15 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 6. 制造一次可恢复错误后再次列出或调用工具，确认 MCP 进程仍然存活。
 7. 并发发起两个 `web_search`，再发起第三个，确认第三个排队且前三个都在 300 秒内返回业务层结果或结构化错误。
 8. 检查 `grok_error` 中的 `termination_reason`、`configured_max_attempts`、`actual_attempts`、`elapsed_ms`、`budget_ms` 和 `queue_wait_ms` 与实际行为一致。
+9. 若端点支持 Responses，将 `GROK_API_PROTOCOL` 临时设为 `responses`，确认 `get_sources` 中出现 `provider="grok-responses"` 的结构化引用；再制造一次 `incomplete`/超时，确认残缺答案不返回且后续工具仍可调用。
 
 所有工具的规范错误对象都位于 `error_detail`，至少包含 `code`、`message`、`service` 和 `retryable`；存在时还包含 `http_status`、`upstream_code` 与脱敏 `diagnostics`。旧字段 `error`、`partial`、`tavily_error`、`grok_error` 仍保留兼容。
 
 超时层级应保持：客户端工具外层 300 秒 > `web_search` 服务端总预算 270 秒 > Grok 单次读取上限 120 秒。最大尝试次数、并发排队、HTTP/流读取、退避和 `Retry-After` 共用 270 秒总预算，因此“最多 5 次”不代表一定执行满 5 次。默认同一进程最多 2 个 Grok 请求；Tavily Search、Extract、Map 每个 Key 合计最多 1 个真实请求，不同健康 Key 可以并发。
 
 P5 不增加客户端参数或返回字段。所有 `web_search` 至少覆盖 5 个独立视角并深挖 2 个方向，普通问题通常形成 7–12 次检索动作，人物、强时效、高风险、比较、小众和争议问题通常为 10–16 次。查询会使用原生语言和相关实体语言扩展；“最新/当前”等请求使用运行时实际日期与时区。设置 `extra_sources>0` 后，Tavily 候选证据会进入 Grok 的最终综合。
+
+信源会话最多保留 256 项并在 1 小时后过期；模型目录成功结果缓存 5 分钟。过期只影响 `get_sources` 或模型校验，不会改变公共工具参数和 P4 返回 Schema。
 
 ## 7. 常见故障
 
@@ -197,6 +208,7 @@ P5 不增加客户端参数或返回字段。所有 `web_search` 至少覆盖 5 
 | JSON 配置报错 | 检查尾逗号、引号和 PowerShell 转义；优先使用 here-string。 |
 | Grok 连接失败 | 检查 `GROK_API_URL` 是否包含正确的 API 根路径及 `/models` 支持。 |
 | Grok 模型最终失败 | 先查看 `error_detail`，再查看兼容的 `grok_error` 尝试次数和最后错误分类；认证、参数、模型不存在和无权限错误会立即停止。 |
+| Responses 返回 400/422 | 恢复 `GROK_API_PROTOCOL=chat_completions`；确认上游确实实现 `/responses` 和 `web_search`，并检查工具调用上限范围。 |
 | Cherry Studio 显示 `-32001` | 将 MCP 工具超时设为 300 秒；确认 `WEB_SEARCH_TOTAL_TIMEOUT` 保持 270 秒或更低。 |
 | 抓取或映射报配置错误 | 配置 Tavily Key，并确认 `TAVILY_ENABLED` 未设为 `false`。 |
 | 客户端显示部分成功 | 检查 `status="partial_success"`、`error_detail` 和组件兼容字段；可用结果仍可使用。 |
