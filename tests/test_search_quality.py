@@ -21,9 +21,11 @@ def request_data(query: str, *, now: datetime | None = None) -> dict:
 def test_simple_fact_still_uses_bounded_deep_search():
     profile = classify_search_query("法国首都是什么？")
     assert profile.depth == "deep"
-    assert profile.search_budget == (
-        "bounded: usually 4-8 targeted searches; stop when key claims converge"
-    )
+    assert profile.search_budget.startswith("bounded: usually 7-12 retrieval actions")
+    assert profile.minimum_breadth_perspectives == 5
+    assert profile.minimum_deep_dive_perspectives == 2
+    assert profile.parallel_breadth_search is True
+    assert profile.multilingual_search is True
     assert profile.query_expansion is True
     assert classify_search_query("What is the capital of France?").depth == "deep"
 
@@ -44,8 +46,26 @@ def test_ambiguous_entity_and_record_queries_default_to_broad_research():
         assert profile.query_expansion is True
         assert profile.confidence_calibration is True
         assert "entity_or_record_research" in profile.categories
+        assert profile.search_budget.startswith("bounded: usually 10-16 retrieval actions")
     assert "Lack of one direct identity-binding page" in SEARCH_PROMPT
     assert "approximate percentage or range" in NORMALIZED_PROMPT
+
+
+def test_search_floor_matches_or_exceeds_reference_project():
+    for rule in (
+        "at least 5 meaningfully different perspectives",
+        "select at least 2 of the most relevant or uncertain perspectives",
+        "at least 7 retrieval actions",
+        "do not count trivial wording variants",
+        "Run independent breadth searches in parallel",
+    ):
+        assert rule in SEARCH_PROMPT
+
+
+def test_multilingual_strategy_keeps_native_and_entity_languages():
+    assert "search the query's native language" in SEARCH_PROMPT
+    assert "Chinese-language queries are mandatory" in SEARCH_PROMPT
+    assert "cross-language searches" in SEARCH_PROMPT
 
 
 def test_current_query_carries_runtime_date_and_freshness_requirements():
@@ -65,6 +85,7 @@ def test_software_strategy_prioritizes_repository_primary_material():
     profile = classify_search_query("排查 GitHub SDK migration error")
     assert profile.depth == "deep"
     assert "software_and_github" in profile.categories
+    assert profile.search_budget.startswith("bounded: usually 10-16 retrieval actions")
     for rule in (
         "current default-branch official docs",
         "releases",
