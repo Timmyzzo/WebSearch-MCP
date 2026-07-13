@@ -56,6 +56,37 @@ def test_timeout_and_concurrency_defaults_and_safety_bounds(monkeypatch):
         _ = config.tavily_per_key_max_concurrency
 
 
+def test_grok_protocol_defaults_and_responses_bounds(monkeypatch):
+    assert config.grok_api_protocol == "chat_completions"
+    assert config.grok_responses_max_tool_calls == 16
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+    monkeypatch.setenv("GROK_RESPONSES_MAX_TOOL_CALLS", "20")
+    assert config.grok_api_protocol == "responses"
+    assert config.grok_responses_max_tool_calls == 20
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "unknown")
+    with pytest.raises(ValueError, match="chat_completions 或 responses"):
+        _ = config.grok_api_protocol
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+    monkeypatch.setenv("GROK_RESPONSES_MAX_TOOL_CALLS", "6")
+    with pytest.raises(ValueError, match="7 和 32"):
+        _ = config.grok_responses_max_tool_calls
+
+
+def test_openrouter_online_suffix_is_only_used_for_chat_completions(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("GROK_PRIMARY_MODEL", "x-ai/grok-test")
+
+    config._cached_model = None
+    assert config.grok_primary_model == "x-ai/grok-test:online"
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+    config._cached_model = None
+    assert config.grok_primary_model == "x-ai/grok-test"
+
+
 def test_tavily_keys_support_all_documented_separators(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEYS", "first, second;third\nfourth\r\nfifth")
 
@@ -97,6 +128,8 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert info["GROK_MODEL_MAX_ATTEMPTS"] == 5
     assert info["GROK_MAX_CONCURRENCY"] == 2
     assert info["WEB_SEARCH_TOTAL_TIMEOUT"] == 270
+    assert info["GROK_API_PROTOCOL"] == "chat_completions"
+    assert info["GROK_RESPONSES_MAX_TOOL_CALLS"] == 16
     assert info["TAVILY_PER_KEY_MAX_CONCURRENCY"] == 1
     assert all("fire" not in key.lower() for key in info)
 

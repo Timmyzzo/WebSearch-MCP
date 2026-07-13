@@ -15,6 +15,8 @@ def reset_config_state(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "GROK_MODEL_MAX_ATTEMPTS",
         "GROK_MAX_CONCURRENCY",
         "WEB_SEARCH_TOTAL_TIMEOUT",
+        "GROK_API_PROTOCOL",
+        "GROK_RESPONSES_MAX_TOOL_CALLS",
         "GROK_RETRY_MULTIPLIER",
         "GROK_RETRY_MAX_WAIT",
         "TAVILY_API_KEY",

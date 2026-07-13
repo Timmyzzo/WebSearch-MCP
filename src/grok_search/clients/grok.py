@@ -16,6 +16,7 @@ from ..concurrency import AsyncConcurrencyLimiter, ConcurrencySlotTimeout
 from ..config import config
 from ..logger import log_info
 from ..prompts import build_search_messages, current_time_context
+from ..sources import merge_sources, split_answer_and_sources
 
 _RELAY_ACCOUNT_PATTERNS = (
     "上游账号不可用",
@@ -67,6 +68,7 @@ _AUTH_PATTERNS = (
 
 _SINGLE_ATTEMPT_READ_TIMEOUT = 120.0
 _MIN_NEW_ATTEMPT_BUDGET = 1.0
+_MAX_RESPONSES_SOURCES = 200
 
 
 def get_local_time_info() -> str:
@@ -188,6 +190,8 @@ class GrokClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random_source: Callable[[], float] = random.random,
         concurrency_limiter: AsyncConcurrencyLimiter | None = None,
+        api_protocol: str | None = None,
+        responses_max_tool_calls: int | None = None,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
@@ -199,6 +203,8 @@ class GrokClient:
         self._closed = False
         self._sleep = sleep
         self._random = random_source
+        self.api_protocol = api_protocol
+        self.responses_max_tool_calls = responses_max_tool_calls
         self._concurrency_limiter = concurrency_limiter or AsyncConcurrencyLimiter(
             config.grok_max_concurrency
         )
@@ -280,6 +286,12 @@ class GrokClient:
         if attempts_limit < 1:
             raise ValueError("每个模型的最大尝试次数必须大于或等于 1")
         request_budget = budget or RequestBudget(config.web_search_total_timeout)
+        api_protocol = self.api_protocol or config.grok_api_protocol
+        responses_max_tool_calls = (
+            self.responses_max_tool_calls
+            if self.responses_max_tool_calls is not None
+            else config.grok_responses_max_tool_calls
+        )
         messages = build_search_messages(
             query,
             platform,
@@ -313,7 +325,12 @@ class GrokClient:
                     configured_max_attempts=attempts_limit,
                     budget=request_budget,
                 )
-            payload = {"model": primary, "messages": messages, "stream": True}
+            payload = self._build_search_payload(
+                model=primary,
+                messages=messages,
+                api_protocol=api_protocol,
+                responses_max_tool_calls=responses_max_tool_calls,
+            )
             try:
                 async with self._concurrency_limiter.slot(
                     request_budget,
@@ -328,8 +345,9 @@ class GrokClient:
                     counts[primary] += 1
                     try:
                         async with asyncio.timeout(remaining):
-                            result = await self._execute_stream(
+                            result = await self._execute_search_request(
                                 payload,
+                                api_protocol=api_protocol,
                                 timeout=remaining,
                             )
                     except TimeoutError as exc:
@@ -337,7 +355,11 @@ class GrokClient:
                             "total_budget_exhausted",
                             action="retry",
                         ) from exc
-                await log_info(ctx, f"Grok model {primary} completed", config.debug_enabled)
+                await log_info(
+                    ctx,
+                    f"Grok model {primary} completed via {api_protocol}",
+                    config.debug_enabled,
+                )
                 return result
             except ConcurrencySlotTimeout as exc:
                 last_failure = _AttemptFailure("concurrency_queue_timeout", action="retry")
@@ -462,6 +484,278 @@ class GrokClient:
         )
         delay = base * (0.5 + 0.5 * min(1.0, max(0.0, self._random())))
         return max(delay, retry_after or 0.0)
+
+    def _build_search_payload(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        api_protocol: str,
+        responses_max_tool_calls: int,
+    ) -> dict[str, Any]:
+        if api_protocol == "chat_completions":
+            return {"model": model, "messages": messages, "stream": True}
+        if api_protocol != "responses":
+            raise ValueError(f"不支持的 Grok API 协议: {api_protocol}")
+
+        if "openrouter" in self.api_url.casefold():
+            tool: dict[str, Any] = {
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": "auto",
+                    "max_results": 5,
+                    "max_total_results": min(20, responses_max_tool_calls),
+                },
+            }
+        else:
+            tool = {"type": "web_search"}
+
+        return {
+            "model": model,
+            "input": messages,
+            "tools": [tool],
+            "max_tool_calls": responses_max_tool_calls,
+            "parallel_tool_calls": True,
+            "store": False,
+            "stream": False,
+        }
+
+    async def _execute_search_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        api_protocol: str,
+        timeout: float,
+    ) -> str:
+        if api_protocol == "responses":
+            return await self._execute_responses(payload, timeout=timeout)
+        return await self._execute_stream(payload, timeout=timeout)
+
+    async def _execute_responses(self, payload: dict[str, Any], *, timeout: float) -> str:
+        try:
+            response = await (await self._get_client()).post(
+                "/responses",
+                headers=self.headers,
+                json=payload,
+                timeout=httpx.Timeout(
+                    connect=min(6.0, timeout),
+                    read=min(_SINGLE_ATTEMPT_READ_TIMEOUT, timeout),
+                    write=min(10.0, timeout),
+                    pool=timeout,
+                ),
+            )
+            if not response.is_success:
+                await response.aread()
+                raise self._classify_response(response)
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise _AttemptFailure("invalid_response", action="retry") from exc
+            return self._parse_responses_response(data, response.status_code)
+        except _AttemptFailure:
+            raise
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            raise _AttemptFailure("connection_failure", action="retry") from exc
+        except httpx.ReadTimeout as exc:
+            raise _AttemptFailure("read_timeout", action="retry") from exc
+        except httpx.TimeoutException as exc:
+            raise _AttemptFailure("timeout", action="retry") from exc
+        except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.RequestError) as exc:
+            raise _AttemptFailure("network_failure", action="retry") from exc
+
+    def _parse_responses_response(self, data: object, status_code: int = 200) -> str:
+        if not isinstance(data, dict):
+            raise _AttemptFailure("invalid_response", action="retry")
+        if isinstance(data.get("error"), dict):
+            raise self._classify_error_data(data, status_code)
+
+        response_status = data.get("status")
+        if isinstance(response_status, str) and response_status != "completed":
+            error_type = (
+                "response_incomplete"
+                if response_status in {"incomplete", "in_progress"}
+                else "invalid_response"
+            )
+            raise _AttemptFailure(error_type, action="retry")
+
+        text = self._responses_text(data)
+        if not text.strip():
+            raise _AttemptFailure("empty_response", action="retry")
+
+        answer, embedded_sources = split_answer_and_sources(text)
+        response_sources = self._responses_sources(data)
+        sources = merge_sources(embedded_sources, response_sources)
+        if not sources:
+            return text
+
+        return (
+            answer.rstrip()
+            + "\n\nsources("
+            + json.dumps(sources, ensure_ascii=False, separators=(",", ":"))
+            + ")"
+        )
+
+    @staticmethod
+    def _responses_text(data: dict[str, Any]) -> str:
+        direct = data.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+        texts: list[str] = []
+        output = data.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type and item_type != "message" and not isinstance(
+                    item.get("message"), dict
+                ):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    message = item.get("message")
+                    content = message.get("content") if isinstance(message, dict) else content
+                if isinstance(content, str) and content.strip():
+                    texts.append(content.strip())
+                    continue
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if isinstance(block, str) and block.strip():
+                        texts.append(block.strip())
+                    elif isinstance(block, dict):
+                        value = block.get("text") or block.get("content")
+                        if isinstance(value, str) and value.strip():
+                            texts.append(value.strip())
+
+        if not texts:
+            choices = data.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    message = choice.get("message")
+                    value = (
+                        message.get("content")
+                        if isinstance(message, dict)
+                        else choice.get("text")
+                    )
+                    if isinstance(value, str) and value.strip():
+                        texts.append(value.strip())
+        return "\n\n".join(texts).strip()
+
+    def _responses_sources(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        candidates: list[object] = []
+        self._collect_annotations(data, candidates)
+
+        citations = data.get("citations")
+        if isinstance(citations, list):
+            candidates.extend(citations)
+
+        output = data.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict) or "search" not in str(item.get("type", "")):
+                    continue
+                action = item.get("action")
+                if isinstance(action, dict):
+                    for key in ("sources", "results", "search_results", "web_results"):
+                        values = action.get(key)
+                        if isinstance(values, list):
+                            candidates.extend(values)
+                    if action.get("url"):
+                        candidates.append(action)
+                for key in ("sources", "results", "search_results"):
+                    values = item.get(key)
+                    if isinstance(values, list):
+                        candidates.extend(values)
+
+        sources: list[dict[str, str]] = []
+        for candidate in candidates:
+            source = self._response_source(candidate)
+            if source is not None:
+                sources.append(source)
+            if len(sources) >= _MAX_RESPONSES_SOURCES:
+                break
+        return merge_sources(sources)
+
+    @classmethod
+    def _collect_annotations(cls, value: object, out: list[object]) -> None:
+        if isinstance(value, list):
+            for item in value:
+                cls._collect_annotations(item, out)
+            return
+        if not isinstance(value, dict):
+            return
+        annotations = value.get("annotations")
+        if isinstance(annotations, list):
+            out.extend(annotations)
+        for key, nested in value.items():
+            if key != "annotations" and isinstance(nested, (dict, list)):
+                cls._collect_annotations(nested, out)
+
+    @staticmethod
+    def _response_source(value: object) -> dict[str, str] | None:
+        if isinstance(value, str):
+            url = value.strip()
+            title = ""
+            description = ""
+        elif isinstance(value, dict):
+            nested_source = value.get("source")
+            nested_citation = value.get("citation") or value.get("url_citation")
+            nested = nested_source if isinstance(nested_source, dict) else nested_citation
+            url = next(
+                (
+                    item.strip()
+                    for item in (
+                        value.get("url"),
+                        value.get("href"),
+                        value.get("link"),
+                        value.get("uri"),
+                        nested.get("url") if isinstance(nested, dict) else None,
+                    )
+                    if isinstance(item, str) and item.strip()
+                ),
+                "",
+            )
+            title = next(
+                (
+                    item.strip()
+                    for item in (
+                        value.get("title"),
+                        value.get("name"),
+                        value.get("label"),
+                        nested.get("title") if isinstance(nested, dict) else None,
+                    )
+                    if isinstance(item, str) and item.strip()
+                ),
+                "",
+            )
+            description = next(
+                (
+                    item.strip()
+                    for item in (
+                        value.get("snippet"),
+                        value.get("description"),
+                        value.get("summary"),
+                        nested.get("snippet") if isinstance(nested, dict) else None,
+                    )
+                    if isinstance(item, str) and item.strip()
+                ),
+                "",
+            )
+        else:
+            return None
+
+        if not url.startswith(("http://", "https://")):
+            return None
+        source = {"url": url, "provider": "grok-responses"}
+        if title:
+            source["title"] = title
+        if description:
+            source["description"] = description
+        return source
 
     async def _execute_stream(self, payload: dict[str, Any], *, timeout: float) -> str:
         try:

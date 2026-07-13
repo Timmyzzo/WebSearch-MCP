@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Annotated
 
 from fastmcp import Context
@@ -25,12 +26,13 @@ from ..models import (
 from ..protocol import error_from_grok, error_from_tavily, internal_error_detail, make_error_detail
 from ..sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
 
-_SOURCES_CACHE = SourcesCache(max_size=256)
-_AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
+_SOURCES_CACHE = SourcesCache(max_size=256, ttl_seconds=3600.0)
+_AVAILABLE_MODELS_CACHE_TTL = 300.0
+_AVAILABLE_MODELS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
 _GROK_CLIENT: GrokClient | None = None
-_GROK_CLIENT_SIGNATURE: tuple[str, str, int] | None = None
+_GROK_CLIENT_SIGNATURE: tuple[str, str, int, str, int] | None = None
 _GROK_CLIENT_LOCK = asyncio.Lock()
 _GROK_CONCURRENCY_LIMITER: AsyncConcurrencyLimiter | None = None
 
@@ -46,12 +48,20 @@ def _new_grok_client(api_url: str, api_key: str) -> GrokClient:
         api_url,
         api_key,
         concurrency_limiter=_GROK_CONCURRENCY_LIMITER,
+        api_protocol=config.grok_api_protocol,
+        responses_max_tool_calls=config.grok_responses_max_tool_calls,
     )
 
 
 async def _get_grok_client(api_url: str, api_key: str) -> GrokClient:
     global _GROK_CLIENT, _GROK_CLIENT_SIGNATURE
-    signature = (api_url, api_key, config.grok_max_concurrency)
+    signature = (
+        api_url,
+        api_key,
+        config.grok_max_concurrency,
+        config.grok_api_protocol,
+        config.grok_responses_max_tool_calls,
+    )
     async with _GROK_CLIENT_LOCK:
         if _GROK_CLIENT is not None and _GROK_CLIENT_SIGNATURE != signature:
             await _GROK_CLIENT.aclose()
@@ -132,14 +142,19 @@ def _grok_catalog_error(exc: BaseException) -> ErrorDetail:
 
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
     key = (api_url, api_key)
+    now = time.monotonic()
     async with _AVAILABLE_MODELS_LOCK:
-        if key in _AVAILABLE_MODELS_CACHE:
-            return _AVAILABLE_MODELS_CACHE[key]
+        cached = _AVAILABLE_MODELS_CACHE.get(key)
+        if cached is not None:
+            expires_at, models = cached
+            if now < expires_at:
+                return models
+            _AVAILABLE_MODELS_CACHE.pop(key, None)
 
     models = await (await _get_grok_client(api_url, api_key)).list_models()
 
     async with _AVAILABLE_MODELS_LOCK:
-        _AVAILABLE_MODELS_CACHE[key] = models
+        _AVAILABLE_MODELS_CACHE[key] = (time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL, models)
     return models
 
 
@@ -268,6 +283,8 @@ async def web_search(
         configured_primary = config.grok_primary_model
         max_attempts = config.grok_model_max_attempts
         _ = config.grok_max_concurrency
+        _ = config.grok_api_protocol
+        _ = config.grok_responses_max_tool_calls
     except ValueError as exc:
         message = f"配置错误: {exc}"
         detail = make_error_detail(

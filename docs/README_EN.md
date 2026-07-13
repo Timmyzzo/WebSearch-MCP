@@ -27,7 +27,7 @@ WebSearch MCP combines Grok's AI-powered web search with Tavily search, page ext
 
 ```text
 MCP Client --stdio--> WebSearch MCP
-                       |-- web_search --> Grok + optional Tavily sources
+                       |-- web_search --> Grok Chat/Responses + optional Tavily sources
                        |-- get_sources --> cached search sources
                        |-- web_fetch  --> Tavily Extract
                        `-- web_map    --> Tavily Map
@@ -39,6 +39,7 @@ MCP Client --stdio--> WebSearch MCP
 | --- | --- |
 | Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
 | Strong-model first | One user-selected Grok model is used throughout, with up to five real attempts by default. |
+| Auditable protocol | Optional xAI Responses explicitly invokes `web_search` and parses citations, annotations, and search traces; Chat remains the compatibility default. |
 | Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
 | Explainable reliability | A roughly 270-second server budget, process-wide Grok concurrency of two, one request per Tavily key, circuits, `Retry-After`, and complete-stream validation. |
 | Stable compatibility | Standard MCP stdio, fixed tool schemas, and three stable outcome states. |
@@ -54,6 +55,7 @@ Typical uses include retrieving current official documentation, producing answer
 - P4 unified response protocol: complete.
 - P5 search prompt and quality work: complete.
 - Search timeout and concurrency governance: automated implementation complete; Cherry Studio acceptance at a 300-second outer timeout remains.
+- External code audit, optional Responses support, and bounded runtime caches: complete.
 - Next: P6 real cross-client acceptance testing.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
@@ -117,6 +119,8 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 | `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model. |
 | `GROK_MAX_CONCURRENCY` | No | `2` | Maximum concurrent Grok `/chat/completions` requests in one MCP process; the safety ceiling is two. |
 | `WEB_SEARCH_TOTAL_TIMEOUT` | No | `270` | Total server-side wall-clock budget for one `web_search`, in seconds. |
+| `GROK_API_PROTOCOL` | No | `chat_completions` | Grok request protocol; set `responses` to invoke server-side `web_search` explicitly. |
+| `GROK_RESPONSES_MAX_TOOL_CALLS` | No | `16` | Maximum server-side tool calls for one Responses request; range 7–32. |
 | `GROK_MODEL` | No | `grok-4-fast` | Compatibility setting mapped to the primary model when `GROK_PRIMARY_MODEL` is empty or unset. |
 | `TAVILY_API_KEY` | No | - | One Tavily key. |
 | `TAVILY_API_KEYS` | No | - | Keys separated by commas, semicolons, or newlines; takes precedence over the single key. |
@@ -159,6 +163,8 @@ This floor matches the validated reference project's requirement of 5+ breadth p
 These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguous-entity research expands aliases, accounts, organizations, teams, collaborators, events, and date ranges, then separates directly confirmed, strongly supported, plausible, conflicting, and rejected links with explainable confidence. Missing one direct identity-binding page does not stop the investigation, but inference is not presented as fact. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
 
 When `extra_sources>0`, Tavily first supplies structured URL, title, and snippet candidates. Grok then combines those leads with its own web search for verification and final synthesis. Candidates remain untrusted evidence. A Tavily failure still permits a Grok `partial_success`, while Tavily can never replace a failed Grok answer.
+
+`GROK_API_PROTOCOL=chat_completions` remains the default, so relays that expose only `/chat/completions` keep working. With `responses`, the server uses non-streaming `/responses` plus explicit `web_search`; only `status=completed` with a non-empty answer succeeds. Structured citations, inline annotations, and search/open-page URLs enter `get_sources`. Requests always use `store=false` to avoid xAI's default request/response retention. Availability still depends on the configured endpoint and model.
 
 The general source hierarchy is: official documentation/standards/laws/original data/papers and systematic reviews; authoritative institutions and maintainers; fact-checked professional media; professional practice; then blogs, forums, and social-media leads. High-tier sources support key conclusions, repeated syndication is not independent evidence, and insufficient evidence is stated explicitly.
 
@@ -256,7 +262,9 @@ Other tool examples:
 {"tool":"plan_intent","status":"partial_success","partial":true,"session_id":"plan123","plan_complete":false,"phases_remaining":["complexity_assessment","query_decomposition"],"error_detail":{"code":"planning_incomplete","message":"The search plan is incomplete","service":"planning","retryable":true,"http_status":null,"upstream_code":null,"diagnostics":{"phases_remaining":["complexity_assessment","query_decomposition"]}}}
 ```
 
-## One strong Grok model with up to five real attempts
+## Grok protocols and one strong model with up to five real attempts
+
+Chat Completions is the compatibility default, while Responses is an optional auditable path. Both protocols share the same model, concurrency, total budget, error classification, and real-attempt accounting. The service never switches protocols after a failure. OpenRouter keeps the `:online` compatibility suffix in Chat mode; Responses uses `openrouter:web_search` without that suffix.
 
 Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, and recognizable relay account-pool failures are retried with jittered exponential backoff, up to five real requests by default.
 
@@ -289,6 +297,10 @@ HTTP 401/403 disables the current key. HTTP 429 is classified using Tavily error
 
 When every key is unavailable, `web_fetch` and `web_map` return `status="error"`, `tavily_all_keys_unavailable`, and masked key states. `web_search` preserves any Grok answer with `status="partial_success"`, `partial=true`, and `tavily_error`. Only the current tool call ends; the MCP process remains alive.
 
+## Bounded runtime caches
+
+Source sessions live only in the current MCP process, with at most 256 entries and a one-hour TTL. `get_sources` returns `session_id_not_found_or_expired` for expired sessions. Successful model catalogs are cached for five minutes before `/models` is refreshed; failures are not cached as empty catalogs. Final answers are not cached long term, and full search bodies are not written to disk by default.
+
 ## Troubleshooting
 
 - If tools are missing, ensure `uvx` is available to the client process and validate the JSON/TOML configuration.
@@ -296,6 +308,7 @@ When every key is unavailable, `web_fetch` and `web_map` return `status="error"`
 - For corporate certificate errors, add `--native-tls` before `--from` in the `uvx` arguments.
 - Configuration diagnostics mask API keys. Never commit real keys or paste them into issues and screenshots.
 - If Cherry Studio still reports `-32001`, set its MCP tool timeout to 300 seconds and keep the server budget below it; the default is 270 seconds. The 300-second value is a safety ceiling, not a performance goal.
+- If Responses returns 400/422 or reports an unavailable tool, restore `GROK_API_PROTOCOL=chat_completions`, then verify that the endpoint exposes `/responses`, the model supports server-side `web_search`, and `GROK_RESPONSES_MAX_TOOL_CALLS` is between 7 and 32.
 
 ## Development
 
@@ -309,6 +322,8 @@ uv run python -m build
 ```
 
 See the [developer guide](./DEVELOPMENT.md) for module ownership, tests, and phase boundaries.
+
+See the [external implementation analysis](./EXTERNAL_PROJECT_ANALYSIS.md) for the code-level comparison, license boundaries, and accepted/rejected designs.
 
 ## License
 
