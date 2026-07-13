@@ -23,7 +23,7 @@
 | Tavily 关系 | 与 Grok 并行，结果事后合并；Grok 未读取这些候选 | 与 Grok/Firecrawl 并行，结果事后合并 | Tavily 先给候选，Grok 在同一次最终综合中核验 | 保持当前证据融合方式 |
 | Grok 失败语义 | 特定额度错误可用 Tavily/Firecrawl 原始结果构造降级答案 | 异常常被吞掉为空字符串，仍可能返回空内容 | Grok 失败始终 `error`，Tavily 不可替代 | 明确拒绝外部降级答案语义 |
 | Fetch/Map | Tavily → Firecrawl → Direct Fetch；Map 有 Direct fallback | Tavily/Firecrawl，历史上 Grok fetch | 仅 Tavily Extract/Map | 不引入 Firecrawl、Direct Fetch 或浏览器链路 |
-| 重试 | 单请求固定次数、指数退避、`Retry-After`；无调用级总预算 | Tenacity；配置名与实际尝试语义存在偏差 | 最多 5 次真实请求，统一总预算和终止原因 | Responses 复用现有 P3/预算机制 |
+| 重试 | 单请求固定次数、指数退避、`Retry-After`；无调用级总预算 | Tenacity；配置名与实际尝试语义存在偏差 | 默认最多 12 次真实请求，统一总预算、可配置内嵌错误码和终止原因 | Responses 评估后未采用 |
 | 并发 | `Promise.all` 并行 provider；无进程级 Grok/Key 限流 | `asyncio.gather`；无共享并发治理 | Grok 最大 2；Tavily 每 Key 最大 1 | 不回退 |
 | 熔断/多 Key | 单 Tavily Key，无 Key/服务级熔断 | 单 Key，无服务级熔断 | P2 四状态、Key/服务熔断、半开探测 | 不回退 |
 | 缓存 | 完整输出可落盘，30 天清理 | 来源 LRU 256；模型列表永久缓存，失败可缓存空列表 | 来源 LRU 256；模型列表永久缓存成功结果 | 来源 TTL 1 小时；模型目录 TTL 5 分钟 |
@@ -132,7 +132,7 @@
 
 - 运行时固定使用流式 `/v1/chat/completions`，删除协议选择环境变量和 Responses 请求/解析路径。
 - 中转站只需兼容 `/v1/chat/completions` 与 `/v1/models`。
-- Chat 请求继续服从最多 5 次真实请求、270 秒总预算、Grok 并发 2、取消释放、错误分类和 P4 组合语义。
+- Chat 请求继续服从可配置真实请求次数（默认 12）、270 秒总预算、Grok 并发 2、取消释放、错误分类和 P4 组合语义。
 - 来源会话默认 1 小时过期且最多 256 项；模型目录成功结果缓存 5 分钟，失败不缓存。
 
 ## 8. 明确拒绝的替代设计

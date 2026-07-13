@@ -279,6 +279,10 @@ async def web_search(
         configured_primary = config.grok_primary_model
         max_attempts = config.grok_model_max_attempts
         _ = config.grok_max_concurrency
+        _ = config.grok_single_attempt_timeout
+        _ = config.retry_multiplier
+        _ = config.retry_max_wait
+        _ = config.grok_retryable_upstream_codes
     except ValueError as exc:
         message = f"配置错误: {exc}"
         detail = make_error_detail(

@@ -151,7 +151,7 @@ async def test_single_model_fails_with_exact_attempt_count():
     assert error.last_upstream_code == "rate_limit"
 
 
-async def test_default_single_model_retry_budget_is_five_real_requests(monkeypatch):
+async def test_default_single_model_retry_budget_is_twelve_real_requests(monkeypatch):
     monkeypatch.delenv("GROK_MODEL_MAX_ATTEMPTS", raising=False)
     calls = 0
 
@@ -171,9 +171,32 @@ async def test_default_single_model_retry_budget_is_five_real_requests(monkeypat
     with pytest.raises(GrokClientError) as caught:
         await client.search("q")
 
-    assert calls == 5
-    assert caught.value.primary_attempts == 5
-    assert caught.value.total_attempts == 5
+    assert calls == 12
+    assert caught.value.primary_attempts == 12
+    assert caught.value.total_attempts == 12
+
+
+async def test_default_retry_budget_can_survive_many_http_200_capacity_failures(monkeypatch):
+    monkeypatch.delenv("GROK_MODEL_MAX_ATTEMPTS", raising=False)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 8:
+            return error_response(200, "upstream_error", "no compute slot available")
+        return sse("recovered")
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        "strong-model",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: _completed_sleep(),
+    )
+
+    assert await client.search("q") == "recovered"
+    assert calls == 8
 
 
 async def test_no_fallback_and_same_fallback_only_run_one_attempt_group():
@@ -269,6 +292,92 @@ async def test_relay_account_unavailable_retries_same_model():
     )
     assert await client.search("q", primary_model="primary", max_attempts=2) == "ok"
     assert calls == 2
+
+
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "upstream_error"])
+async def test_http_200_retryable_upstream_codes_retry(code):
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return error_response(200, code, "temporary provider capacity failure")
+        return sse()
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: _completed_sleep(),
+    )
+    assert await client.search("q", primary_model="primary", max_attempts=2) == "ok"
+    assert calls == 2
+
+
+async def test_http_200_sse_rate_limit_error_retries():
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            body = 'data: {"error":{"code":"rate_limit_exceeded","message":"busy"}}\n\n'
+            return httpx.Response(
+                200,
+                text=body,
+                headers={"content-type": "text/event-stream"},
+            )
+        return sse()
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: _completed_sleep(),
+    )
+    assert await client.search("q", primary_model="primary", max_attempts=2) == "ok"
+    assert calls == 2
+
+
+async def test_custom_retryable_upstream_code_retries(monkeypatch):
+    monkeypatch.setenv("GROK_RETRYABLE_UPSTREAM_CODES", "capacity_exhausted")
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return error_response(200, "capacity_exhausted", "try another account")
+        return sse()
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: _completed_sleep(),
+    )
+    assert await client.search("q", primary_model="primary", max_attempts=2) == "ok"
+    assert calls == 2
+
+
+async def test_unknown_http_200_upstream_code_stays_fatal():
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return error_response(200, "billing_disabled", "billing is disabled")
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GrokClientError) as caught:
+        await client.search("q", primary_model="primary", max_attempts=4)
+    assert calls == 1
+    assert caught.value.termination_reason == "non_retryable_error"
 
 
 @pytest.mark.parametrize(
@@ -423,6 +532,7 @@ async def test_backoff_is_exponential_jittered_and_injectable(monkeypatch):
     with pytest.raises(GrokClientError):
         await client.search("q", primary_model="primary", max_attempts=3)
     assert sleeps == [1.5, 3.0]
+    assert client._retry_delay(100_000, None) <= 10
 
 
 async def test_client_reuses_pool_closes_and_redacts_credentials():

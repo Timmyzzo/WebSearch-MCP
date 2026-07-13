@@ -97,7 +97,7 @@ P3 在不提前实现 P4 统一协议的前提下增加了：
 搜索超时与并发治理在 P2/P3/P4 兼容语义上增加：
 
 - `WEB_SEARCH_TOTAL_TIMEOUT=270` 的调用级单调时钟预算，覆盖 Tavily 补充、Grok 槽位、真实请求、完整流读取、退避和 `Retry-After`。
-- `GROK_MAX_CONCURRENCY=2` 的进程级共享异步限制器；每个真实重试重新获取槽位，120 秒单次读取上限会裁剪到剩余总预算。
+- `GROK_MAX_CONCURRENCY=2` 的进程级共享异步限制器；每个真实重试重新获取槽位，可配置的单次读取上限会裁剪到剩余总预算。
 - `TAVILY_PER_KEY_MAX_CONCURRENCY=1` 的共享 Key 租约；健康 Key 忙碌时优先调度其他 Key，全部忙碌时在调用预算内等待。
 - `max_attempts_exhausted`、`non_retryable_error`、`total_budget_exhausted`、`concurrency_queue_timeout` 四类终止诊断，以及配置/实际尝试数、耗时、预算和排队毫秒数。
 - 总预算错误只结束当前调用；Grok 失败而 Tavily 成功仍是 `error`，残缺流仍不得返回、缓存或用于来源提取。
@@ -150,7 +150,7 @@ git diff --check
 
 - 新增环境变量已写入中英文 README。
 - Chat-only 配置已写入中英文客户端指南，并明确 API 根地址和客户端超时。
-- Cherry Studio 文档明确 300 秒客户端上限、270 秒服务端预算、120 秒单次读取上限及并发等待/重试关系。
+- Cherry Studio 文档明确客户端上限、服务端预算、可配置单次读取上限及并发等待/重试关系。
 - 工具 Schema 变更有自动化测试。
 - 错误消息不包含完整 API Key。
 - Cherry Studio、Claude Code 和 Codex 的 stdio 启动方式仍然一致。
