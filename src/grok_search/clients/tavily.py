@@ -269,7 +269,12 @@ class TavilyClient:
         if not self.reliability.raw_keys:
             raise self._error(
                 "tavily_configuration_error",
-                "配置错误: Tavily API Key 未配置，请设置 TAVILY_API_KEY 或 TAVILY_API_KEYS",
+                (
+                    "配置错误: Tavily API Key 未配置。"
+                    "web_fetch/web_map 必须使用 Tavily Extract/Map；"
+                    "请在 MCP 环境变量中设置 TAVILY_API_KEY 或 TAVILY_API_KEYS"
+                    "（多个 Key 可用逗号分隔）。"
+                ),
             )
         service = await self.reliability.service_summary()
         if self.reliability.service_state in {
@@ -321,7 +326,12 @@ class TavilyClient:
         api_key = self._legacy_key_provider() if self._legacy_key_provider else None
         if not api_key:
             raise TavilyClientError(
-                "配置错误: Tavily API Key 未配置，请设置 TAVILY_API_KEY 或 TAVILY_API_KEYS",
+                (
+                    "配置错误: Tavily API Key 未配置。"
+                    "web_fetch/web_map 必须使用 Tavily Extract/Map；"
+                    "请在 MCP 环境变量中设置 TAVILY_API_KEY 或 TAVILY_API_KEYS"
+                    "（多个 Key 可用逗号分隔）。"
+                ),
                 code="tavily_configuration_error",
             )
         try:

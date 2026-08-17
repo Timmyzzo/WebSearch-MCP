@@ -31,9 +31,9 @@ class InterruptingStream(httpx.AsyncByteStream):
         self.closed = True
 
 
-async def test_grok_search_only_uses_chat_completions(monkeypatch):
+async def test_grok_search_defaults_to_chat_completions(monkeypatch):
     captured = {}
-    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+    monkeypatch.delenv("GROK_API_PROTOCOL", raising=False)
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured["path"] = request.url.path
@@ -53,6 +53,139 @@ async def test_grok_search_only_uses_chat_completions(monkeypatch):
     assert captured["path"] == "/v1/chat/completions"
     assert captured["payload"]["model"] == "grok-test"
     assert captured["payload"]["stream"] is True
+    assert "messages" in captured["payload"]
+    await client.aclose()
+
+
+def responses_sse(content: str = "ok") -> httpx.Response:
+    body = (
+        f'data: {json.dumps({"type": "response.output_text.delta", "delta": content})}\n\n'
+        f'data: {json.dumps({"type": "response.completed"})}\n\n'
+    )
+    return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+
+async def test_grok_search_uses_responses_endpoint_when_protocol_response(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("GROK_API_PROTOCOL", "response")
+    monkeypatch.delenv("GROK_SERVER_TOOLS", raising=False)
+    monkeypatch.delenv("GROK_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("GROK_RESPONSES_STORE", raising=False)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return responses_sse("hello from responses")
+
+    client = GrokClient(
+        "https://grok.example/v1/",
+        "secret",
+        "grok-4.5",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.search("current release", max_attempts=1)
+
+    assert result == "hello from responses"
+    assert captured["path"] == "/v1/responses"
+    payload = captured["payload"]
+    assert payload["model"] == "grok-4.5"
+    assert payload["stream"] is True
+    assert payload["store"] is False
+    assert isinstance(payload["input"], list)
+    assert payload["input"][0]["role"] == "system"
+    assert payload["input"][-1]["role"] == "user"
+    assert payload["tools"] == [{"type": "web_search"}, {"type": "x_search"}]
+    assert "messages" not in payload
+    assert "instructions" not in payload
+    await client.aclose()
+
+
+async def test_grok_search_accepts_responses_alias(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return responses_sse("alias ok")
+
+    client = GrokClient(
+        "https://grok.example/v1/",
+        "secret",
+        "grok-test",
+        transport=httpx.MockTransport(handler),
+    )
+    assert await client.search("q", max_attempts=1) == "alias ok"
+    assert captured["path"] == "/v1/responses"
+    await client.aclose()
+
+
+async def test_multi_agent_model_forces_responses_and_xhigh_effort(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("GROK_API_PROTOCOL", "chat")  # should be overridden
+    monkeypatch.delenv("GROK_REASONING_EFFORT", raising=False)
+    monkeypatch.setenv("GROK_SERVER_TOOLS", "web_search,x_search")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return responses_sse("multi-agent answer")
+
+    client = GrokClient(
+        "https://api.x.ai/v1",
+        "secret",
+        "grok-4.20-multi-agent-xhigh",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await client.search("research quantum computing", max_attempts=1)
+
+    assert result == "multi-agent answer"
+    assert captured["path"] == "/v1/responses"
+    payload = captured["payload"]
+    assert payload["model"] == "grok-4.20-multi-agent-xhigh"
+    assert payload["reasoning"] == {"effort": "xhigh"}
+    assert payload["tools"] == [{"type": "web_search"}, {"type": "x_search"}]
+    assert payload["store"] is False
+    await client.aclose()
+
+
+async def test_server_tools_can_be_disabled(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("GROK_API_PROTOCOL", "response")
+    monkeypatch.setenv("GROK_SERVER_TOOLS", "none")
+    monkeypatch.setenv("GROK_REASONING_EFFORT", "low")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return responses_sse("no tools")
+
+    client = GrokClient(
+        "https://api.x.ai/v1",
+        "secret",
+        "grok-4.5",
+        transport=httpx.MockTransport(handler),
+    )
+    assert await client.search("q", max_attempts=1) == "no tools"
+    assert "tools" not in captured["payload"]
+    assert captured["payload"]["reasoning"] == {"effort": "low"}
+    await client.aclose()
+
+
+async def test_grok_search_strips_complete_think_blocks():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return sse("<think>internal reasoning</think>\n\nVerified answer")
+
+    client = GrokClient(
+        "https://grok.example/v1",
+        "secret",
+        "grok-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.search("question", max_attempts=1)
+
+    assert result == "Verified answer"
+    assert "internal reasoning" not in result
     await client.aclose()
 
 
@@ -151,7 +284,7 @@ async def test_single_model_fails_with_exact_attempt_count():
     assert error.last_upstream_code == "rate_limit"
 
 
-async def test_default_single_model_retry_budget_is_twelve_real_requests(monkeypatch):
+async def test_default_single_model_retry_budget_is_five_real_requests(monkeypatch):
     monkeypatch.delenv("GROK_MODEL_MAX_ATTEMPTS", raising=False)
     calls = 0
 
@@ -171,13 +304,13 @@ async def test_default_single_model_retry_budget_is_twelve_real_requests(monkeyp
     with pytest.raises(GrokClientError) as caught:
         await client.search("q")
 
-    assert calls == 12
-    assert caught.value.primary_attempts == 12
-    assert caught.value.total_attempts == 12
+    assert calls == 5
+    assert caught.value.primary_attempts == 5
+    assert caught.value.total_attempts == 5
 
 
-async def test_default_retry_budget_can_survive_many_http_200_capacity_failures(monkeypatch):
-    monkeypatch.delenv("GROK_MODEL_MAX_ATTEMPTS", raising=False)
+async def test_retry_budget_can_survive_many_http_200_capacity_failures(monkeypatch):
+    monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "12")
     calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:

@@ -6,6 +6,14 @@ This guide covers standard MCP stdio configuration for Cherry Studio, Claude Cod
 https://github.com/Timmyzzo/WebSearch-MCP
 ```
 
+## 0. Recommended client system prompt (Layer A)
+
+After installing the MCP server, paste the official system prompt into Claude / Cherry Studio / your agent **System Prompt** (do not inject it into Grok):
+
+- Full text and paper workflow: [CLIENT_SYSTEM_PROMPT.md](./CLIENT_SYSTEM_PROMPT.md)
+
+Summary: tools/models interact in English; user-facing output in Chinese; `web_search` (Grok) for broad discovery; `web_fetch` / `web_map` (Tavily) for full text and site structure; never use Grok as a full-page fetch substitute. Claude Code may show names like `mcp__grok-search__web_search`.
+
 ## 1. Common requirements
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure the client process can find `uvx`:
@@ -20,7 +28,7 @@ Minimum environment:
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
 GROK_PRIMARY_MODEL=grok-4-fast
-GROK_MODEL_MAX_ATTEMPTS=12
+GROK_MODEL_MAX_ATTEMPTS=5
 GROK_MAX_CONCURRENCY=2
 WEB_SEARCH_TOTAL_TIMEOUT=270
 GROK_SINGLE_ATTEMPT_TIMEOUT=120
@@ -29,11 +37,25 @@ GROK_RETRY_MAX_WAIT=10
 GROK_RETRYABLE_UPSTREAM_CODES=rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error
 ```
 
-Add `TAVILY_API_KEY` for page extraction, site mapping, and supplemental sources. Use `TAVILY_API_KEYS=key-1,key-2` for multiple keys.
+**`web_fetch` / `web_map` require Tavily** (not optional). Missing keys return structured, actionable errors — not silent empty results. Set `TAVILY_API_KEY` or `TAVILY_API_KEYS=key-1,key-2`. Grok-only setups can still run `web_search`.
 
 If `GROK_PRIMARY_MODEL` is empty or unset, the compatibility variable `GROK_MODEL` is used before the persisted setting and `grok-4-fast`. The service uses that one strong model without automatic fallback. Recoverable failures receive at most twelve real requests by default.
 
-The upstream protocol is fixed to streaming `/v1/chat/completions`; `/responses` and runtime protocol switching are not supported. `GROK_API_URL` should normally end in `/v1` and also expose `/models`.
+Upstream protocol is selected by `GROK_API_PROTOCOL`: `chat` (default) → streaming `/v1/chat/completions`; `response` → streaming `/v1/responses` (xAI preferred). Aliases `responses` / `chat_completions` are accepted. **Multi-agent models (`grok-*-multi-agent*`) always use Responses** even if `chat` is configured.
+
+Recommended for Grok 4.5 / multi-agent web research:
+
+```text
+GROK_API_PROTOCOL=response
+GROK_PRIMARY_MODEL=grok-4.5
+# GROK_PRIMARY_MODEL=grok-4.20-multi-agent-xhigh
+GROK_SERVER_TOOLS=web_search,x_search
+GROK_REASONING_EFFORT=xhigh
+GROK_RESPONSES_STORE=false
+GROK_SINGLE_ATTEMPT_TIMEOUT=600
+```
+
+`GROK_SERVER_TOOLS` maps to xAI built-in tools; set `none` to disable. `reasoning.effort` of `high`/`xhigh` ≈ 16 agents; `low`/`medium` ≈ 4 agents. `GROK_API_URL` should end in `/v1` and expose `/models`.
 
 Some relays wrap temporary failures in HTTP 200 responses. `GROK_RETRYABLE_UPSTREAM_CODES` accepts comma, semicolon, or newline separators and replaces the default list; keep any default codes that still need retries when adding provider-specific codes. `GROK_SINGLE_ATTEMPT_TIMEOUT`, `GROK_RETRY_MULTIPLIER`, and `GROK_RETRY_MAX_WAIT` control the per-attempt read limit and exponential backoff.
 
@@ -57,7 +79,7 @@ Add a stdio MCP server:
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
         "GROK_PRIMARY_MODEL": "grok-4-fast",
-        "GROK_MODEL_MAX_ATTEMPTS": "12",
+        "GROK_MODEL_MAX_ATTEMPTS": "5",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
         "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -94,7 +116,7 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "GROK_MAX_CONCURRENCY": "2",
     "WEB_SEARCH_TOTAL_TIMEOUT": "270",
     "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -125,7 +147,7 @@ $config = @'
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "GROK_MAX_CONCURRENCY": "2",
     "WEB_SEARCH_TOTAL_TIMEOUT": "270",
     "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -167,7 +189,7 @@ tool_timeout_sec = 300
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
 GROK_PRIMARY_MODEL = "grok-4-fast"
-GROK_MODEL_MAX_ATTEMPTS = "12"
+GROK_MODEL_MAX_ATTEMPTS = "5"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
 GROK_SINGLE_ATTEMPT_TIMEOUT = "120"
@@ -210,9 +232,9 @@ The canonical error object is `error_detail`, with at least `code`, `message`, `
 
 Keep the timeout hierarchy as: 300-second client tool timeout > 270-second server `web_search` budget > 120-second Grok read limit per attempt. Maximum attempts, concurrency waits, HTTP/stream time, backoff, and `Retry-After` share the same 270-second budget, so “up to twelve” does not guarantee twelve requests. One process permits at most two Grok requests by default. Tavily Search, Extract, and Map share a one-request-per-key limit, while distinct healthy keys may run concurrently.
 
-P5 adds no client parameters or response fields. Every `web_search` covers at least five independent perspectives and deep-dives into two. Normal requests usually use 7–12 retrieval actions; ambiguous entities, current events, comparisons, high-risk, niche, and contested questions usually use 10–16. Queries expand across their native language and relevant entity languages. With `extra_sources>0`, Tavily candidates enter Grok's final synthesis.
+Grok uses a short English Layer-B search prompt: answer simple questions quickly; add multi-perspective / deeper search only when needed — **no hard 7–16 retrieval floor**. Client-side evidence rules live in Layer A ([CLIENT_SYSTEM_PROMPT.md](./CLIENT_SYSTEM_PROMPT.md)). Time-sensitive queries use the runtime date/timezone. With `extra_sources>0`, Tavily Search candidates may enter Grok synthesis; full papers/long docs still require `web_fetch` (Tavily Extract).
 
-Source sessions retain at most 256 entries and expire after one hour. Successful model catalogs are cached for five minutes. Expiration affects only `get_sources` or model validation; public tool parameters and the P4 response schema do not change.
+Source sessions retain at most 256 entries and expire after one hour. Optional planning sessions retain at most 256 entries and expire after one hour of inactivity. Successful model catalogs are cached for five minutes. Expiration affects only `get_sources`, later planning phases, or model validation; public tool parameters and the P4 response schema do not change.
 
 ## 7. Troubleshooting
 

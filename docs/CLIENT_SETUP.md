@@ -6,6 +6,14 @@
 https://github.com/Timmyzzo/WebSearch-MCP
 ```
 
+## 0. 推荐客户端系统提示（层 A）
+
+安装 MCP 后，请把官方推荐系统提示粘贴到 Claude / Cherry Studio / 其他 Agent 的 **System Prompt**，不要注入到 Grok 服务端：
+
+- 全文与工作流说明：[CLIENT_SYSTEM_PROMPT.md](./CLIENT_SYSTEM_PROMPT.md)
+
+要点：工具/模型内部用 English，对用户用中文；`web_search`（Grok）广搜定位；`web_fetch` / `web_map`（Tavily）全文与站内映射；论文全文禁止用 Grok 代替 fetch。Claude Code 工具名可能为 `mcp__grok-search__web_search` 等形式。
+
 ## 1. 公共要求
 
 安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，并确保客户端进程能找到 `uvx`：
@@ -20,7 +28,7 @@ uvx --version
 GROK_API_URL=https://your-api-endpoint.example/v1
 GROK_API_KEY=your-grok-api-key
 GROK_PRIMARY_MODEL=grok-4-fast
-GROK_MODEL_MAX_ATTEMPTS=12
+GROK_MODEL_MAX_ATTEMPTS=5
 GROK_MAX_CONCURRENCY=2
 WEB_SEARCH_TOTAL_TIMEOUT=270
 GROK_SINGLE_ATTEMPT_TIMEOUT=120
@@ -29,17 +37,31 @@ GROK_RETRY_MAX_WAIT=10
 GROK_RETRYABLE_UPSTREAM_CODES=rate_limit,rate_limit_exceeded,too_many_requests,upstream_error,server_error,service_unavailable,temporarily_unavailable,overloaded,overloaded_error,internal_error
 ```
 
-如需网页提取、站点映射或额外信源，再配置：
+**`web_fetch` / `web_map` 必须配置 Tavily**（不是可选装饰）。未配置时工具返回结构化错误，不会静默空返回：
 
 ```text
 TAVILY_API_KEY=tvly-your-tavily-key
 ```
 
-多个 Tavily Key 使用 `TAVILY_API_KEYS`，例如 `key-1,key-2,key-3`。
+多个 Tavily Key 使用 `TAVILY_API_KEYS`，例如 `key-1,key-2,key-3`。仅做 `web_search` 时可只配 Grok。
 
-`GROK_PRIMARY_MODEL` 未设置或为空时，会使用兼容变量 `GROK_MODEL`，再回退到持久化配置和 `grok-4-fast`。服务只使用这个模型，不自动降级到备用模型；可恢复故障默认最多真实调用 12 次。
+`GROK_PRIMARY_MODEL` 未设置或为空时，会使用兼容变量 `GROK_MODEL`，再回退到持久化配置和 `grok-4-fast`。服务只使用这个模型，不自动降级到备用模型；可恢复故障默认最多真实调用 5 次。
 
-上游协议固定为流式 `/v1/chat/completions`，不支持 `/responses` 或运行时协议切换。`GROK_API_URL` 通常应以 `/v1` 结尾，并同时提供 `/models`。
+上游协议由 `GROK_API_PROTOCOL` 选择：`chat`（默认）→ 流式 `/v1/chat/completions`；`response` → 流式 `/v1/responses`（xAI 官方推荐）。别名 `responses` / `chat_completions` 可用。**`grok-*-multi-agent*` 模型按官方文档必须用 Responses，即使配置了 chat 也会强制切换。**
+
+推荐 Grok 4.5 / multi-agent 联网研究配置：
+
+```text
+GROK_API_PROTOCOL=response
+GROK_PRIMARY_MODEL=grok-4.5
+# GROK_PRIMARY_MODEL=grok-4.20-multi-agent-xhigh
+GROK_SERVER_TOOLS=web_search,x_search
+GROK_REASONING_EFFORT=xhigh
+GROK_RESPONSES_STORE=false
+GROK_SINGLE_ATTEMPT_TIMEOUT=600
+```
+
+`GROK_SERVER_TOOLS` 对应 xAI 内置 tools（`web_search` / `x_search` 等）；`none` 关闭。`reasoning.effort` 的 `high`/`xhigh` 约为 16 agent，`low`/`medium` 约为 4 agent。`GROK_API_URL` 通常应以 `/v1` 结尾，并提供 `/models`。
 
 部分中转站会用 HTTP 200 包装临时错误。`GROK_RETRYABLE_UPSTREAM_CODES` 支持逗号、分号或换行分隔，并会替换默认列表；新增中转站错误码时请同时保留仍需重试的默认项。`GROK_SINGLE_ATTEMPT_TIMEOUT`、`GROK_RETRY_MULTIPLIER` 和 `GROK_RETRY_MAX_WAIT` 分别控制单次读取上限、退避初始乘数和单次退避上限。
 
@@ -63,7 +85,7 @@ TAVILY_API_KEY=tvly-your-tavily-key
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
         "GROK_PRIMARY_MODEL": "grok-4-fast",
-        "GROK_MODEL_MAX_ATTEMPTS": "12",
+        "GROK_MODEL_MAX_ATTEMPTS": "5",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
         "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -100,7 +122,7 @@ claude mcp add-json grok-search --scope user '{
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "GROK_MAX_CONCURRENCY": "2",
     "WEB_SEARCH_TOTAL_TIMEOUT": "270",
     "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -131,7 +153,7 @@ $config = @'
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "GROK_MAX_CONCURRENCY": "2",
     "WEB_SEARCH_TOTAL_TIMEOUT": "270",
     "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -173,7 +195,7 @@ tool_timeout_sec = 300
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
 GROK_PRIMARY_MODEL = "grok-4-fast"
-GROK_MODEL_MAX_ATTEMPTS = "12"
+GROK_MODEL_MAX_ATTEMPTS = "5"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
 GROK_SINGLE_ATTEMPT_TIMEOUT = "120"
@@ -216,11 +238,11 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 
 所有工具的规范错误对象都位于 `error_detail`，至少包含 `code`、`message`、`service` 和 `retryable`；存在时还包含 `http_status`、`upstream_code` 与脱敏 `diagnostics`。旧字段 `error`、`partial`、`tavily_error`、`grok_error` 仍保留兼容。
 
-超时层级应保持：客户端工具外层 300 秒 > `web_search` 服务端总预算 270 秒 > Grok 单次读取上限 120 秒。最大尝试次数、并发排队、HTTP/流读取、退避和 `Retry-After` 共用 270 秒总预算，因此“最多 12 次”不代表一定执行满 12 次。默认同一进程最多 2 个 Grok 请求；Tavily Search、Extract、Map 每个 Key 合计最多 1 个真实请求，不同健康 Key 可以并发。
+超时层级应保持：客户端工具外层 300 秒 > `web_search` 服务端总预算 270 秒 > Grok 单次读取上限 120 秒。最大尝试次数、并发排队、HTTP/流读取、退避和 `Retry-After` 共用 270 秒总预算，因此“最多 5 次”不代表一定执行满。默认同一进程最多 2 个 Grok 请求；Tavily Search、Extract、Map 每个 Key 合计最多 1 个真实请求，不同健康 Key 可以并发。
 
-P5 不增加客户端参数或返回字段。所有 `web_search` 至少覆盖 5 个独立视角并深挖 2 个方向，普通问题通常形成 7–12 次检索动作，人物、强时效、高风险、比较、小众和争议问题通常为 10–16 次。查询会使用原生语言和相关实体语言扩展；“最新/当前”等请求使用运行时实际日期与时区。设置 `extra_sources>0` 后，Tavily 候选证据会进入 Grok 的最终综合。
+Grok 侧使用短英文搜索提示（层 B）：简单问题尽快答，复杂问题再多视角/深挖，**无强制 7–16 次检索楼层**。证据标准放在客户端系统提示（层 A，见 [CLIENT_SYSTEM_PROMPT.md](./CLIENT_SYSTEM_PROMPT.md)）。查询使用运行时实际日期与时区。设置 `extra_sources>0` 后，Tavily Search 候选可进入 Grok 综合；论文/长文全文仍必须 `web_fetch`（Tavily Extract）。
 
-信源会话最多保留 256 项并在 1 小时后过期；模型目录成功结果缓存 5 分钟。过期只影响 `get_sources` 或模型校验，不会改变公共工具参数和 P4 返回 Schema。
+信源会话最多保留 256 项并在 1 小时后过期；可选规划会话最多保留 256 项，并在空闲 1 小时后过期；模型目录成功结果缓存 5 分钟。过期只影响 `get_sources`、后续规划阶段或模型校验，不会改变公共工具参数和 P4 返回 Schema。
 
 ## 7. 常见故障
 

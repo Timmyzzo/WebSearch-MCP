@@ -4,7 +4,7 @@
 
 面向 Cherry Studio、Claude Code 与 Codex 的标准 MCP 网络搜索服务
 
-**深度检索 · 270 秒主动预算 · Grok 并发 2 · Tavily 每 Key 并发 1**
+**双引擎分工 · 短提示广搜 · 270 秒主动预算 · Grok 并发 2 · Tavily 每 Key 并发 1**
 
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -18,29 +18,36 @@
   <a href="#为什么选择-websearch-mcp">核心能力</a> ·
   <a href="#工具概览">工具</a> ·
   <a href="#配置">配置</a> ·
-  <a href="./docs/CLIENT_SETUP.md">客户端接入</a>
+  <a href="./docs/CLIENT_SETUP.md">客户端接入</a> ·
+  <a href="./docs/CLIENT_SYSTEM_PROMPT.md">推荐系统提示</a>
 </p>
 
 ## WebSearch MCP 是什么
 
-WebSearch MCP 把 Grok 的 AI 联网搜索与 Tavily 的结构化检索、网页提取和站点映射组合成一个标准 MCP stdio 服务。它不依赖某个客户端的私有能力，也不会修改 Cherry Studio、Claude Code 或 Codex 的本地配置。
+WebSearch MCP 把 **Grok 广搜** 与 **Tavily 全文抓取 / 站点映射** 组合成标准 MCP stdio 服务（双引擎各取所长）。它不依赖某个客户端的私有能力，也不会修改 Cherry Studio、Claude Code 或 Codex 的本地配置。
 
 ```text
-MCP Client ──stdio──► WebSearch MCP
-                       ├─ web_search ─► Grok /v1/chat/completions + 可选 Tavily 信源
-                       ├─ get_sources ─► 搜索信源缓存
-                       ├─ web_fetch  ─► Tavily Extract
-                       └─ web_map    ─► Tavily Map
+Claude / 其他 MCP Client
+        │  stdio MCP
+        ▼
+   Grok Search Server
+        ├─ web_search  ───► Grok API（AI 联网搜索：广、快、找信源）
+        ├─ get_sources ───► 搜索信源 session 缓存
+        ├─ web_fetch   ───► Tavily Extract（工程化全文抓取：完整、保真）
+        └─ web_map     ───► Tavily Map（站点映射 / agentic crawl 入口）
 ```
+
+**红线分工**：`web_search` 只走 Grok；`web_fetch` / `web_map` **必须** 走 Tavily。论文与长文全文请 `web_search` 定位后用 `web_fetch` 读取，禁止用 Grok 代替全文抓取。仅配置 Grok 时搜索仍可用；未配置 Tavily 时 fetch/map 返回明确结构化错误。
 
 ## 为什么选择 WebSearch MCP
 
 | 能力 | 实际行为 |
 | --- | --- |
-| 深度优先 | 每次搜索至少覆盖 5 个独立视角并深挖其中 2 个方向，通常形成 7–12 次检索动作。 |
-| 强模型优先 | 始终使用用户配置的单一最强 Grok 模型；临时错误默认最多真实调用 12 次。 |
-| 单一上游协议 | 只调用 OpenAI 兼容的 `/v1/chat/completions`，不启用 Responses 或自动协议切换。 |
-| 证据融合 | Tavily 候选证据会进入 Grok 的同一次核验与最终综合，而不是只在事后缓存。 |
+| 双引擎红线 | Grok 负责广搜与信源；Tavily Extract/Map 负责全文与站内结构；职责不混用。 |
+| 短提示广搜 | Grok 侧使用短英文搜索提示（层 B），避免超长 system 注入导致超时；证据细则在客户端系统提示（层 A）。 |
+| 强模型优先 | 始终使用用户配置的单一最强 Grok 模型；临时错误默认最多真实调用 5 次（可配置）。 |
+| 可选上游协议 | `GROK_API_PROTOCOL=chat`（默认，`/chat/completions`）或 `response`（`/responses`）。 |
+| 证据融合 | `extra_sources>0` 时 Tavily 候选可进入同一次 Grok 综合；fetch/map 仍独立走 Tavily。 |
 | 可解释可靠性 | 约 270 秒服务端总预算、Grok 进程级并发 2、Tavily 每 Key 并发 1、熔断、`Retry-After` 与完整流校验。 |
 | 稳定兼容 | 标准 MCP stdio、固定工具 Schema、统一 `success` / `partial_success` / `error`。 |
 
@@ -74,11 +81,11 @@ MCP Client ──stdio──► WebSearch MCP
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - 一个 OpenAI 兼容的 Grok API 地址和 Key
-- 可选的 Tavily Key；`web_fetch`、`web_map` 和额外 Tavily 信源需要它
+- **Tavily Key（fetch/map 必要）**：`web_fetch`、`web_map` 必须配置；`extra_sources` 可选增强
 
 ### 2. 添加 MCP 服务
 
-以下配置可直接复制；将 API 地址、Key 和模型替换为你的实际值。`GROK_API_URL` 必须是以 `/v1` 结尾的 API 根地址，本项目只调用 `/v1/chat/completions` 和 `/v1/models`。
+以下配置可直接复制；将 API 地址、Key 和模型替换为你的实际值。`GROK_API_URL` 必须是以 `/v1` 结尾的 API 根地址。按 `GROK_API_PROTOCOL` 调用 `/chat/completions` 或 `/responses`，并使用 `/models`。
 
 #### Cherry Studio（JSON）
 
@@ -96,7 +103,7 @@ MCP Client ──stdio──► WebSearch MCP
         "GROK_API_URL": "https://your-api-endpoint.example/v1",
         "GROK_API_KEY": "your-grok-api-key",
         "GROK_PRIMARY_MODEL": "grok-4-fast",
-        "GROK_MODEL_MAX_ATTEMPTS": "12",
+        "GROK_MODEL_MAX_ATTEMPTS": "5",
         "GROK_MAX_CONCURRENCY": "2",
         "WEB_SEARCH_TOTAL_TIMEOUT": "270",
         "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -130,7 +137,7 @@ Cherry Studio 还需把 MCP 工具调用超时设置为 `300` 秒。
     "GROK_API_URL": "https://your-api-endpoint.example/v1",
     "GROK_API_KEY": "your-grok-api-key",
     "GROK_PRIMARY_MODEL": "grok-4-fast",
-    "GROK_MODEL_MAX_ATTEMPTS": "12",
+    "GROK_MODEL_MAX_ATTEMPTS": "5",
     "GROK_MAX_CONCURRENCY": "2",
     "WEB_SEARCH_TOTAL_TIMEOUT": "270",
     "GROK_SINGLE_ATTEMPT_TIMEOUT": "120",
@@ -174,7 +181,7 @@ tool_timeout_sec = 300
 GROK_API_URL = "https://your-api-endpoint.example/v1"
 GROK_API_KEY = "your-grok-api-key"
 GROK_PRIMARY_MODEL = "grok-4-fast"
-GROK_MODEL_MAX_ATTEMPTS = "12"
+GROK_MODEL_MAX_ATTEMPTS = "5"
 GROK_MAX_CONCURRENCY = "2"
 WEB_SEARCH_TOTAL_TIMEOUT = "270"
 GROK_SINGLE_ATTEMPT_TIMEOUT = "120"
@@ -189,6 +196,7 @@ TAVILY_API_KEYS = "tvly-key-1,tvly-key-2"
 
 - [客户端配置指南（中文）](./docs/CLIENT_SETUP.md)
 - [Client setup guide (English)](./docs/CLIENT_SETUP_EN.md)
+- [推荐客户端系统提示（层 A）](./docs/CLIENT_SYSTEM_PROMPT.md) — 粘贴到 Claude / Cherry Studio 系统提示
 
 ### 3. 验证
 
@@ -209,10 +217,14 @@ switch_model
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `GROK_API_URL` | 是 | - | OpenAI 兼容 API 根地址（通常以 `/v1` 结尾），需提供 `/chat/completions` 和 `/models`。 |
+| `GROK_API_URL` | 是 | - | OpenAI 兼容 API 根地址（通常以 `/v1` 结尾），需提供 `/models` 以及所选协议端点。 |
 | `GROK_API_KEY` | 是 | - | Grok API Key。 |
+| `GROK_API_PROTOCOL` | 否 | `chat` | 上游请求形态：`chat` → `POST /chat/completions`；`response` → `POST /responses`。别名：`responses`、`chat_completions`。**multi-agent 模型会强制走 response**。 |
+| `GROK_SERVER_TOOLS` | 否 | `web_search,x_search` | Responses 内置服务端工具（xAI tools）。`none` 关闭。也支持 `code_interpreter` / `collections_search`。 |
+| `GROK_REASONING_EFFORT` | 否 | - | Responses `reasoning.effort`：`low`/`medium`（约 4 agent）或 `high`/`xhigh`（约 16 agent）。也可写在模型名后缀如 `…-multi-agent-xhigh`。 |
+| `GROK_RESPONSES_STORE` | 否 | `false` | Responses 是否在服务端保存会话（MCP 默认关闭）。 |
 | `GROK_PRIMARY_MODEL` | 否 | 见下文 | 每次搜索使用的强模型名称，由用户自行填写。 |
-| `GROK_MODEL_MAX_ATTEMPTS` | 否 | `12` | 当前模型对可恢复故障的最多真实请求次数，必须为正整数，不设固定上限。 |
+| `GROK_MODEL_MAX_ATTEMPTS` | 否 | `5` | 当前模型对可恢复故障的最多真实请求次数，必须为正整数，不设固定上限。 |
 | `GROK_MAX_CONCURRENCY` | 否 | `2` | 同一 MCP 进程最多同时发出的 Grok `/chat/completions` 请求数；安全上限为 2。 |
 | `WEB_SEARCH_TOTAL_TIMEOUT` | 否 | `270` | 单次 `web_search` 的服务端总墙钟预算，单位秒。 |
 | `GROK_SINGLE_ATTEMPT_TIMEOUT` | 否 | `120` | 单次 Grok 流读取超时秒数；实际值不会超过当前剩余总预算。 |
@@ -233,7 +245,7 @@ switch_model
 | `GROK_LOG_LEVEL` | 否 | `INFO` | 日志级别。 |
 | `GROK_LOG_DIR` | 否 | `logs` | 日志目录。 |
 
-只配置 Grok 时，`web_search` 仍可使用。设置 `TAVILY_ENABLED=false` 会禁用 Tavily，即使环境中存在 Tavily Key。
+只配置 Grok 时，`web_search` 仍可使用。**`web_fetch` / `web_map` 依赖 Tavily**，未配置 `TAVILY_API_KEY` / `TAVILY_API_KEYS` 时返回可操作错误（不会静默空返回）。设置 `TAVILY_ENABLED=false` 会禁用 Tavily，即使环境中存在 Tavily Key。
 
 模型解析优先级为：当前进程中 `switch_model` 设置的模型、非空 `GROK_PRIMARY_MODEL`、非空 `GROK_MODEL`、配置文件中的模型、默认值 `grok-4-fast`。环境变量仅包含空白时视为未设置。服务不会自动降级到较弱备用模型；请直接配置你希望使用的最强可用模型。
 
@@ -243,45 +255,59 @@ switch_model
 
 ## 工具概览
 
-| 工具 | 用途 | 工具专属字段 |
+| 工具 | 引擎 | 用途 | 工具专属字段 |
+| --- | --- | --- | --- |
+| `web_search` | **Grok** | 广搜、快定位、初答 + 可追溯信源；**不**做全文抓取 | `session_id`、`content`、`sources_count`、`grok_error`、`tavily_error` |
+| `get_sources` | 本地缓存 | 读取某次搜索的完整信源 | `session_id`、`sources`、`sources_count` |
+| `web_fetch` | **Tavily Extract** | 论文/长文/文档全文 → 高保真 Markdown | `url`、`content`、`provider`、`tavily_error` |
+| `web_map` | **Tavily Map** | 站内 URL 结构发现，便于再 fetch | `base_url`、`results`、`response_time`、`tavily_error` |
+| `get_config_info` | 诊断 | 查看脱敏配置并测试 Grok 连接 | `configuration`、`connection_test` |
+| `switch_model` | 配置 | 持久化并切换当前进程的 Grok 主模型 | `success`、`previous_model`、`current_model` |
+
+所有工具还统一返回 `status`、`error`、`error_detail` 和 `partial`。`web_search` 的 `query` 是唯一必填参数。规划工具是可选能力，不是搜索前置步骤；所有 `thought` 参数均为可选。Claude Code 侧工具名可能带 `mcp__grok-search__` 前缀。
+
+## 搜索提示与双引擎工作流
+
+### 两层提示（勿混用）
+
+| 层 | 位置 | 作用 |
 | --- | --- | --- |
-| `web_search` | Grok 主搜索，可选 Tavily 候选证据综合 | `session_id`、`content`、`sources_count`、`grok_error`、`tavily_error` |
-| `get_sources` | 读取某次搜索的完整信源 | `session_id`、`sources`、`sources_count` |
-| `web_fetch` | 使用 Tavily Extract 提取 Markdown | `url`、`content`、`provider`、`tavily_error` |
-| `web_map` | 使用 Tavily Map 发现站点结构 | `base_url`、`results`、`response_time`、`tavily_error` |
-| `get_config_info` | 查看脱敏配置并测试 Grok 连接 | `configuration`、`connection_test` |
-| `switch_model` | 持久化并切换当前进程的 Grok 主模型 | `success`、`previous_model`、`current_model` |
+| **层 A** | [客户端系统提示](./docs/CLIENT_SYSTEM_PROMPT.md) | Claude 等调用方：英文思考、中文对用户、证据标准、何时 search/fetch/map |
+| **层 B** | MCP 内短英文 `SEARCH_PROMPT` | 仅服务 Grok `web_search`：广而快、可溯源、Markdown + Sources 段 |
 
-所有工具还统一返回 `status`、`error`、`error_detail` 和 `partial`。`web_search` 的 `query` 是唯一必填参数。规划工具是可选能力，不是搜索前置步骤；所有 `thought` 参数均为可选。
+层 B **禁止** 硬编码 7–16 次检索楼层或单次注入超长领域细则，以免 MCP 超时、弱于原项目可用性。
 
-## 搜索质量与深度优先策略
+### 推荐工作流
 
-每次 `web_search` 都使用有界 `deep` 策略：先检索至少 5 个真正不同的视角，再选择至少 2 个最相关或最不确定的方向继续深挖，因此普通问题通常形成 7–12 次检索动作。人物身份、强时效、高风险、比较、小众和争议问题通常提升到 10–16 次。简单事实和单一官方文档也不会低于这一下限，但答案篇幅仍按问题本身保持简洁。
+```text
+web_search（Grok）定位 URL / 初答
+    → web_fetch（Tavily）读论文或文档全文
+    →（可选）web_map（Tavily）扩展站内页面再 fetch
+    → 客户端按层 A 证据标准综合，用中文回复用户
+```
 
-这一执行下限与原项目已验证策略对齐：原项目要求 5 个以上广度视角和至少 2 个深挖方向；本项目在此基础上增加确定性预算、原生语言与实体相关语言检索、来源等级、反证检查和 Tavily 候选证据综合。微小措辞变化不能被计为不同视角，达到次数也不能替代证据质量。
+当 `extra_sources>0` 时，Tavily Search 可提供结构化候选进入 Grok 综合；这是增强，**不能** 削弱「fetch/map 必 Tavily」叙事。Tavily 补充失败时 Grok 仍可 `partial_success`；Grok 失败时 Tavily 不能替代最终答案。
 
-这些数量是 Prompt 中的有界搜索预算，不会形成无限工具循环。模糊实体调查会扩展别名、账号、组织、团队、协作者、事件与时间范围，并把结论分为直接确认、强支持、合理候选和冲突/排除，同时给出可解释的置信度。缺少单一实名绑定页不会让搜索提前停止，但不会把推测伪装成事实。用户查询与平台提示以 JSON 数据传递；网页、搜索片段和用户输入中的指令不能覆盖系统搜索规则。
+Grok 上游由 `GROK_API_PROTOCOL` 选择：默认 `chat` → 流式 `/chat/completions`；`response` → 流式 `/responses`（官方推荐，`input` 消息数组 + 可选 server tools）。使用 **Grok 4.5 / multi-agent** 做联网研究时建议：
 
-当 `extra_sources>0` 时，Tavily 会先提供结构化 URL、标题和摘要候选，Grok 再结合自身联网搜索完成证据核对与答案综合；候选内容仍被视为不可信资料，不会覆盖系统规则。Tavily 失败时 Grok 仍可返回 `partial_success`，Grok 失败时 Tavily 仍不能替代最终答案。
+```text
+GROK_API_PROTOCOL=response
+GROK_PRIMARY_MODEL=grok-4.5
+# 或 multi-agent（Chat Completions 不可用，会自动强制 response）:
+# GROK_PRIMARY_MODEL=grok-4.20-multi-agent-xhigh
+GROK_SERVER_TOOLS=web_search,x_search
+GROK_REASONING_EFFORT=xhigh   # multi-agent 深度；4.5 可按需设置
+GROK_SINGLE_ATTEMPT_TIMEOUT=600
+WEB_SEARCH_TOTAL_TIMEOUT=270
+```
 
-Grok 上游协议固定为流式 Chat Completions。服务不会读取协议选择环境变量，不会调用 `/responses`，也不会在失败时自动切换端点；中转站只需兼容 `/v1/chat/completions` 和 `/v1/models`。
-
-通用来源优先级为：官方文档/标准/法规/原始数据/论文与系统综述，权威机构和项目维护团队，有事实核查的专业媒体，专业实践经验，最后才是博客、论坛和社交媒体线索。关键结论优先使用高等级来源；转载同一原始消息不算独立证据，证据不足时会明确说明。
-
-领域策略包括：
-
-- 软件与 GitHub：优先当前默认分支文档、README、Release、Changelog、迁移指南、API Reference、commit、issue、PR 和维护者说明，并核对稳定版、发布日期、弃用与最终合并代码。
-- 健身、健康、营养与恢复：区分研究支持、专家实践和运动员个人经验，结合训练年龄、伤病、基础、恢复、设备和周期；伤病、疾病、药物或极端饮食明确医疗评估边界。
-- 汽车和其他高风险安全问题：优先官方测试与真实事故数据，区分碰撞避免和乘员保护，不跨不兼容标准机械比较星级，并说明统计限制和不确定性。
-- 小众、模糊或证据稀缺问题：先定义概念，必要时使用同义词或多语言检索，主动寻找反例、失败案例和不同学派，并尝试用两类独立来源交叉验证。
-
-“最新、当前、今天、现版本、仍然支持”等查询会使用运行时实际日期和时区，核对版本、发布日期和资料更新时间。复杂答案按需要说明证据等级、争议、限制、适用范围和不确定性；简单答案不会被强制套用冗长模板。P4 的 `success`、`partial_success`、`error`、`error_detail` 和全部兼容字段保持不变。
+用户查询以短 JSON 传递；匹配到的领域细则（`prompt_domains/*.md`）按需追加到 system。关键结论附 Sources/References，便于 `get_sources` 缓存。
 
 ## 超时与并发治理
 
 Cherry Studio 建议把 MCP 工具外层超时设置为 300 秒；这是避免客户端过早产生 `-32001` 的安全上限，不是性能目标。服务端单次 `web_search` 默认使用 `WEB_SEARCH_TOTAL_TIMEOUT=270` 的总墙钟预算，并在该预算内主动返回成功、部分成功或结构化错误，为 MCP 序列化、进程调度和客户端传输预留约 30 秒。
 
-Grok 单次读取上限由 `GROK_SINGLE_ATTEMPT_TIMEOUT` 控制，默认 120 秒；每次真实尝试的实际可用时间会缩短为“单次上限与当前剩余总预算中的较小值”。`GROK_MODEL_MAX_ATTEMPTS=12` 只表示最多 12 次真实 HTTP 请求，不保证一定执行 12 次：等待 Grok 槽位、Tavily Key 槽位、HTTP 传输、流读取、指数退避和 `Retry-After` 都消耗同一个总预算；剩余预算不足以容纳合理的新尝试时会提前停止。
+Grok 单次读取上限由 `GROK_SINGLE_ATTEMPT_TIMEOUT` 控制，默认 120 秒；每次真实尝试的实际可用时间会缩短为“单次上限与当前剩余总预算中的较小值”。`GROK_MODEL_MAX_ATTEMPTS=5` 只表示最多 5 次真实 HTTP 请求，不保证一定执行满：等待 Grok 槽位、Tavily Key 槽位、HTTP 传输、流读取、指数退避和 `Retry-After` 都消耗同一个总预算；剩余预算不足以容纳合理的新尝试时会提前停止。
 
 同一 MCP 进程默认最多同时执行 2 个 Grok HTTP 请求。Tavily Search、Extract、Map 共用 Key 健康与占用状态，每个 Key 同时最多 1 个真实请求；多个健康 Key 可以各承担一个并发请求。所有槽位在成功、错误、取消、超时和流中断路径中释放，重试也必须重新排队。预算终止诊断会区分 `max_attempts_exhausted`、`non_retryable_error`、`total_budget_exhausted` 和 `concurrency_queue_timeout`，并报告配置/实际尝试数、耗时、预算与排队时间。
 
@@ -364,9 +390,9 @@ Grok 最终失败时，即使 Tavily 成功也不会伪装为答案：
 
 ## Grok Chat 协议、单强模型与最多五次真实尝试
 
-服务只使用流式 Chat Completions。OpenRouter 地址会继续为模型追加兼容的 `:online` 后缀；任何失败都只在同一个 `/v1/chat/completions` 端点和当前模型上按规则重试。
+服务按 `GROK_API_PROTOCOL` 使用 `chat` 或 `response` 单一端点（不自动跨协议切换）。OpenRouter 地址会继续为模型追加兼容的 `:online` 后缀；失败时只在当前协议端点与当前模型上按规则重试。
 
-每次调用只使用用户配置的当前模型。408、429、5xx、连接失败、连接/读取超时、完整内容产生前或流式传输中的中断，可识别的中转站“上游账号不可用/死号/账号池不可用”，以及 `GROK_RETRYABLE_UPSTREAM_CODES` 列出的 HTTP 200 内嵌错误，会按带随机抖动的指数退避重试，默认最多执行 12 次真实请求。
+每次调用只使用用户配置的当前模型。408、429、5xx、连接失败、连接/读取超时、完整内容产生前或流式传输中的中断，可识别的中转站“上游账号不可用/死号/账号池不可用”，以及 `GROK_RETRYABLE_UPSTREAM_CODES` 列出的 HTTP 200 内嵌错误，会按带随机抖动的指数退避重试，默认最多执行 5 次真实请求。
 
 重试不会突破 `WEB_SEARCH_TOTAL_TIMEOUT`，也不会绕过 `GROK_MAX_CONCURRENCY`。认证、参数、模型不存在和无权限错误会以“因不可重试错误提前停止”结束；只有确实达到配置上限才报告“已用尽最大尝试次数”。总预算或并发排队耗尽使用独立终止原因和结构化诊断。
 
@@ -399,7 +425,7 @@ Key 的“忙碌”是独立于上述健康状态的瞬时占用信息，不会�
 
 ## 有界运行时缓存
 
-搜索信源会话只保存在当前 MCP 进程内，最多 256 项并在 1 小时后过期；`get_sources` 对过期会话返回 `session_id_not_found_or_expired`。模型目录的成功结果缓存 5 分钟，之后重新读取 `/models`；失败不会被缓存为空结果。服务不长期缓存最终答案，也不会默认把完整搜索正文写入磁盘。
+搜索信源会话只保存在当前 MCP 进程内，最多 256 项并在 1 小时后过期；`get_sources` 对过期会话返回 `session_id_not_found_or_expired`。可选规划会话同样最多保留 256 项，并在空闲 1 小时后过期。模型目录的成功结果缓存 5 分钟，之后重新读取 `/models`；失败不会被缓存为空结果。服务不长期缓存最终答案，也不会默认把完整搜索正文写入磁盘。
 
 ## 常见问题
 

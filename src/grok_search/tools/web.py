@@ -246,10 +246,14 @@ def _grok_budget_error(
 @mcp.tool(
     name="web_search",
     description=(
-        "Research the web with Grok and optionally use structured Tavily evidence. "
-        "Returns unified status/error_detail fields plus a session_id and answer content."
+        "Grok AI web search: broad discovery, fast source location, and an initial "
+        "answer with traceable references. Not for full-page extraction — use "
+        "web_fetch (Tavily Extract) for papers/long docs. Optional extra_sources>0 "
+        "feeds Tavily search candidates into synthesis only. Returns session_id, "
+        "content, sources_count, status/error_detail. Use get_sources(session_id) "
+        "for the full source list."
     ),
-    meta={"version": "3.0.0"},
+    meta={"version": "3.2.0"},
 )
 async def web_search(
     query: Annotated[str, Field(description="Clear, self-contained search query.", min_length=1)],
@@ -278,6 +282,10 @@ async def web_search(
         api_key = config.grok_api_key
         configured_primary = config.grok_primary_model
         max_attempts = config.grok_model_max_attempts
+        _ = config.grok_api_protocol
+        _ = config.grok_server_tools
+        _ = config.grok_reasoning_effort
+        _ = config.grok_responses_store
         _ = config.grok_max_concurrency
         _ = config.grok_single_attempt_timeout
         _ = config.retry_multiplier
@@ -555,8 +563,13 @@ async def get_sources(
 
 @mcp.tool(
     name="web_fetch",
-    description="Extract a web page as Markdown using Tavily Extract.",
-    meta={"version": "2.0.0"},
+    description=(
+        "Extract a full web page as high-fidelity Markdown via Tavily Extract. "
+        "Preferred for papers, long articles, and official documentation full text. "
+        "Requires TAVILY_API_KEY or TAVILY_API_KEYS. Do not use Grok web_search as "
+        "a substitute for full-page fetch."
+    ),
+    meta={"version": "2.1.0"},
 )
 async def web_fetch(
     url: Annotated[
@@ -612,8 +625,12 @@ async def web_fetch(
 
 @mcp.tool(
     name="web_map",
-    description="Discover a website's URL structure using Tavily Map.",
-    meta={"version": "2.0.0"},
+    description=(
+        "Discover a website's URL structure via Tavily Map (agentic crawl entry). "
+        "Use before selective web_fetch of key pages. Requires TAVILY_API_KEY or "
+        "TAVILY_API_KEYS."
+    ),
+    meta={"version": "2.1.0"},
 )
 async def web_map(
     url: Annotated[

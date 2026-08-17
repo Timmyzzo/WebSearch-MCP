@@ -27,7 +27,7 @@ def test_grok_model_legacy_and_empty_values(monkeypatch, tmp_path):
 
 
 def test_grok_model_attempts_default_and_validation(monkeypatch):
-    assert config.grok_model_max_attempts == 12
+    assert config.grok_model_max_attempts == 5
     monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "20")
     assert config.grok_model_max_attempts == 20
     monkeypatch.setenv("GROK_MODEL_MAX_ATTEMPTS", "0")
@@ -97,6 +97,53 @@ def test_openrouter_online_suffix_is_used_for_chat_completions(monkeypatch):
     config._cached_model = None
     assert config.grok_primary_model == "x-ai/grok-test:online"
 
+
+def test_grok_api_protocol_chat_or_response(monkeypatch):
+    monkeypatch.delenv("GROK_API_PROTOCOL", raising=False)
+    assert config.grok_api_protocol == "chat"
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "chat")
+    assert config.grok_api_protocol == "chat"
+    monkeypatch.setenv("GROK_API_PROTOCOL", "RESPONSE")
+    assert config.grok_api_protocol == "response"
+    monkeypatch.setenv("GROK_API_PROTOCOL", "responses")
+    assert config.grok_api_protocol == "response"
+    monkeypatch.setenv("GROK_API_PROTOCOL", "chat_completions")
+    assert config.grok_api_protocol == "chat"
+
+    monkeypatch.setenv("GROK_API_PROTOCOL", "graphql")
+    with pytest.raises(ValueError, match="chat 或 response"):
+        _ = config.grok_api_protocol
+
+
+def test_grok_server_tools_and_reasoning_effort(monkeypatch):
+    monkeypatch.delenv("GROK_SERVER_TOOLS", raising=False)
+    assert config.grok_server_tools == [
+        {"type": "web_search"},
+        {"type": "x_search"},
+    ]
+
+    monkeypatch.setenv("GROK_SERVER_TOOLS", "web_search, code_execution")
+    assert config.grok_server_tools == [
+        {"type": "web_search"},
+        {"type": "code_interpreter"},
+    ]
+    monkeypatch.setenv("GROK_SERVER_TOOLS", "none")
+    assert config.grok_server_tools == []
+
+    monkeypatch.delenv("GROK_REASONING_EFFORT", raising=False)
+    assert config.grok_reasoning_effort is None
+    monkeypatch.setenv("GROK_REASONING_EFFORT", "xhigh")
+    assert config.grok_reasoning_effort == "xhigh"
+    monkeypatch.setenv("GROK_REASONING_EFFORT", "extreme")
+    with pytest.raises(ValueError, match="low、medium、high 或 xhigh"):
+        _ = config.grok_reasoning_effort
+
+    monkeypatch.delenv("GROK_RESPONSES_STORE", raising=False)
+    assert config.grok_responses_store is False
+    monkeypatch.setenv("GROK_RESPONSES_STORE", "true")
+    assert config.grok_responses_store is True
+
 def test_tavily_keys_support_all_documented_separators(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEYS", "first, second;third\nfourth\r\nfifth")
 
@@ -135,7 +182,7 @@ def test_config_info_contains_only_current_services(monkeypatch):
     assert set(info).issuperset({"GROK_API_URL", "GROK_API_KEY", "TAVILY_API_URL"})
     assert info["GROK_PRIMARY_MODEL"] == "grok-4-fast"
     assert info["GROK_FALLBACK_MODEL"] == "已弃用（单模型模式）"
-    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 12
+    assert info["GROK_MODEL_MAX_ATTEMPTS"] == 5
     assert info["GROK_MAX_CONCURRENCY"] == 2
     assert info["WEB_SEARCH_TOTAL_TIMEOUT"] == 270
     assert info["GROK_SINGLE_ATTEMPT_TIMEOUT"] == 120

@@ -4,7 +4,7 @@ English | [简体中文](../README.md)
 
 A standard MCP web-search server for Cherry Studio, Claude Code, and Codex
 
-**Deep research · active 270-second budget · Grok concurrency 2 · one Tavily request per key**
+**Dual-engine · short search prompts · active 270-second budget · Grok concurrency 2 · one Tavily request per key**
 
 [![CI](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Timmyzzo/WebSearch-MCP/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
@@ -18,30 +18,37 @@ A standard MCP web-search server for Cherry Studio, Claude Code, and Codex
   <a href="#why-websearch-mcp">Highlights</a> ·
   <a href="#tool-overview">Tools</a> ·
   <a href="#configuration">Configuration</a> ·
-  <a href="./CLIENT_SETUP_EN.md">Client setup</a>
+  <a href="./CLIENT_SETUP_EN.md">Client setup</a> ·
+  <a href="./CLIENT_SYSTEM_PROMPT.md">Client system prompt</a>
 </p>
 
 ## What is WebSearch MCP?
 
-WebSearch MCP combines Grok's AI-powered web search with Tavily search, page extraction, and site mapping behind a standard MCP stdio server. It does not depend on private client capabilities and never edits local Cherry Studio, Claude Code, or Codex configuration.
+WebSearch MCP combines **Grok broad search** with **Tavily full-page extract / site map** behind a standard MCP stdio server (dual-engine, each for its strength). It does not depend on private client capabilities and never edits local Cherry Studio, Claude Code, or Codex configuration.
 
 ```text
-MCP Client --stdio--> WebSearch MCP
-                       |-- web_search --> Grok /v1/chat/completions + optional Tavily sources
-                       |-- get_sources --> cached search sources
-                       |-- web_fetch  --> Tavily Extract
-                       `-- web_map    --> Tavily Map
+Claude / other MCP Client
+        |  stdio MCP
+        v
+   Grok Search Server
+        |-- web_search  --> Grok API (broad, fast, sources)
+        |-- get_sources --> session source cache
+        |-- web_fetch   --> Tavily Extract (high-fidelity Markdown)
+        `-- web_map     --> Tavily Map (site structure / crawl entry)
 ```
+
+**Hard split**: `web_search` uses Grok only; `web_fetch` / `web_map` **require** Tavily. For papers and long docs, locate with `web_search` then read with `web_fetch` — never use Grok as a full-page fetch substitute.
 
 ## Why WebSearch MCP
 
 | Capability | Observable behavior |
 | --- | --- |
-| Deep by default | Every search covers at least five independent perspectives and deep-dives into two, usually producing 7–12 retrieval actions. |
-| Strong-model first | One user-selected Grok model is used throughout, with up to twelve real attempts by default. |
-| Single upstream protocol | Calls only OpenAI-compatible `/v1/chat/completions`; Responses and automatic protocol switching are disabled. |
-| Evidence fusion | Tavily candidates enter the same Grok verification and synthesis request. |
-| Explainable reliability | A roughly 270-second server budget, process-wide Grok concurrency of two, one request per Tavily key, circuits, `Retry-After`, and complete-stream validation. |
+| Dual-engine red line | Grok for discovery/sources; Tavily Extract/Map for full text and site structure. |
+| Short Layer-B prompts | Compact English Grok system prompt; client evidence rules live in Layer A docs. |
+| Strong-model first | One user-selected Grok model throughout; recoverable failures up to 5 real attempts by default. |
+| Selectable protocol | `GROK_API_PROTOCOL=chat` (default, `/chat/completions`) or `response` (`/responses`). |
+| Evidence fusion | Optional Tavily search candidates (`extra_sources`) can enter the same Grok synthesis; fetch/map stay Tavily-only. |
+| Explainable reliability | ~270s server budget, Grok concurrency 2, one request per Tavily key, circuits, `Retry-After`, complete-stream validation. |
 | Stable compatibility | Standard MCP stdio, fixed tool schemas, and three stable outcome states. |
 
 Typical uses include retrieving current official documentation, producing answers with traceable sources, extracting pages as Markdown, and reusing the same web tools across MCP clients.
@@ -55,7 +62,7 @@ Typical uses include retrieving current official documentation, producing answer
 - P4 unified response protocol: complete.
 - P5 search prompt and quality work: complete.
 - Search timeout and concurrency governance: automated implementation complete; Cherry Studio acceptance at a 300-second outer timeout remains.
-- External code audit and bounded runtime caches: complete; runtime traffic is Chat Completions only.
+- External code audit and bounded runtime caches: complete; runtime protocol selectable via `GROK_API_PROTOCOL` (`chat` / `response`).
 - Next: P6 real cross-client acceptance testing.
 
 See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acceptance criteria.
@@ -67,7 +74,7 @@ See the [development roadmap](./DEVELOPMENT_ROADMAP.md) for requirements and acc
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - An OpenAI-compatible Grok API URL and key
-- An optional Tavily key for `web_fetch`, `web_map`, and supplemental sources
+- **Tavily key required for fetch/map**: `web_fetch` and `web_map` need it; `extra_sources` is optional enhancement
 
 ### 2. Add the MCP server
 
@@ -113,10 +120,14 @@ Call `get_config_info` first to inspect masked configuration and test the Grok `
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `GROK_API_URL` | Yes | - | OpenAI-compatible API root with `/chat/completions` and `/models`. |
+| `GROK_API_URL` | Yes | - | OpenAI-compatible API root with `/models` and the selected protocol endpoint. |
 | `GROK_API_KEY` | Yes | - | Grok API key. |
+| `GROK_API_PROTOCOL` | No | `chat` | `chat` → `/chat/completions`; `response` → `/responses`. Multi-agent models force `response`. |
+| `GROK_SERVER_TOOLS` | No | `web_search,x_search` | Responses built-in tools. `none` disables. |
+| `GROK_REASONING_EFFORT` | No | - | `low`/`medium`/`high`/`xhigh` for multi-agent agent count. |
+| `GROK_RESPONSES_STORE` | No | `false` | Whether Responses may store state server-side. |
 | `GROK_PRIMARY_MODEL` | No | See below | Strong model selected by the user for every Grok search. |
-| `GROK_MODEL_MAX_ATTEMPTS` | No | `12` | Maximum real requests for recoverable failures on the current model; any positive integer is accepted. |
+| `GROK_MODEL_MAX_ATTEMPTS` | No | `5` | Maximum real requests for recoverable failures on the current model; any positive integer is accepted. |
 | `GROK_MAX_CONCURRENCY` | No | `2` | Maximum concurrent Grok `/chat/completions` requests in one MCP process; the safety ceiling is two. |
 | `WEB_SEARCH_TOTAL_TIMEOUT` | No | `270` | Total server-side wall-clock budget for one `web_search`, in seconds. |
 | `GROK_SINGLE_ATTEMPT_TIMEOUT` | No | `120` | Per-attempt stream read limit, clipped to the remaining total budget. |
@@ -145,45 +156,46 @@ The default HTTP-200 retry codes are `rate_limit`, `rate_limit_exceeded`, `too_m
 
 ## Tool overview
 
-| Tool | Purpose | Tool-specific fields |
+| Tool | Engine | Purpose | Tool-specific fields |
+| --- | --- | --- | --- |
+| `web_search` | **Grok** | Broad discovery, sources, initial answer — **not** full-page extract | `session_id`, `content`, `sources_count`, `grok_error`, `tavily_error` |
+| `get_sources` | Local cache | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count` |
+| `web_fetch` | **Tavily Extract** | High-fidelity Markdown for papers/long docs | `url`, `content`, `provider`, `tavily_error` |
+| `web_map` | **Tavily Map** | Site URL discovery before selective fetch | `base_url`, `results`, `response_time`, `tavily_error` |
+| `get_config_info` | Diagnostics | Return masked configuration and test Grok | `configuration`, `connection_test` |
+| `switch_model` | Config | Persist and select the primary Grok model | `success`, `previous_model`, `current_model` |
+
+Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query` is the only required `web_search` argument. Planning tools are optional. Claude Code may prefix tool names with `mcp__grok-search__`.
+
+## Search prompts and dual-engine workflow
+
+### Two prompt layers (do not mix)
+
+| Layer | Location | Role |
 | --- | --- | --- |
-| `web_search` | Grok search with optional Tavily evidence synthesis | `session_id`, `content`, `sources_count`, `grok_error`, `tavily_error` |
-| `get_sources` | Retrieve all cached sources for one search | `session_id`, `sources`, `sources_count` |
-| `web_fetch` | Extract Markdown with Tavily Extract | `url`, `content`, `provider`, `tavily_error` |
-| `web_map` | Discover site URLs with Tavily Map | `base_url`, `results`, `response_time`, `tavily_error` |
-| `get_config_info` | Return masked configuration and test Grok | `configuration`, `connection_test` |
-| `switch_model` | Persist and select the primary Grok model | `success`, `previous_model`, `current_model` |
+| **A** | [CLIENT_SYSTEM_PROMPT.md](./CLIENT_SYSTEM_PROMPT.md) | Client agent: English thinking, Chinese user output, evidence standards, when to search/fetch/map |
+| **B** | Short English `SEARCH_PROMPT` in MCP | Grok `web_search` only: broad/fast, traceable sources, Markdown + Sources section |
 
-Every tool also returns `status`, `error`, `error_detail`, and `partial`. `query` is the only required `web_search` argument. Planning tools are optional, and every `thought` argument is optional.
+Layer B **must not** hard-code a 7–16 retrieval floor or inject oversized domain essays into every Grok call.
 
-## Search quality and deep-first execution
+### Recommended workflow
 
-Every `web_search` uses a bounded `deep` profile: search at least five genuinely different perspectives, then investigate at least two of the most relevant or uncertain perspectives further. Normal requests therefore use roughly 7–12 retrieval actions; ambiguous entities, current events, comparisons, high-risk, niche, and contested questions usually use 10–16. Simple facts and single official-document requests keep the same floor while their final answers remain concise.
+```text
+web_search (Grok) → locate URLs / initial answer
+  → web_fetch (Tavily) → full paper or doc Markdown
+  → optional web_map (Tavily) → more site URLs → selective fetch
+  → client synthesizes with Layer A evidence rules (Chinese to user)
+```
 
-This floor matches the validated reference project's requirement of 5+ breadth perspectives and at least two depth investigations. WebSearch MCP adds deterministic budgets, native/entity-language searches, source hierarchy, counterevidence, and Tavily evidence synthesis. Minor wording variants do not count as separate perspectives, and source quantity never replaces quality.
+When `extra_sources>0`, Tavily Search can supply structured candidates into Grok synthesis as an enhancement; fetch/map remain Tavily-required. A Tavily supplement failure still allows Grok `partial_success`; Tavily cannot replace a failed Grok answer.
 
-These are bounded prompt budgets, not an autonomous unbounded tool loop. Ambiguous-entity research expands aliases, accounts, organizations, teams, collaborators, events, and date ranges, then separates directly confirmed, strongly supported, plausible, conflicting, and rejected links with explainable confidence. Missing one direct identity-binding page does not stop the investigation, but inference is not presented as fact. The query and platform focus are passed as JSON data; instructions in user input, pages, or search snippets cannot override the system search rules.
-
-When `extra_sources>0`, Tavily first supplies structured URL, title, and snippet candidates. Grok then combines those leads with its own web search for verification and final synthesis. Candidates remain untrusted evidence. A Tavily failure still permits a Grok `partial_success`, while Tavily can never replace a failed Grok answer.
-
-The upstream protocol is fixed to streaming Chat Completions. The server does not read a protocol-selection variable, call `/responses`, or switch endpoints after a failure; a relay only needs `/v1/chat/completions` and `/v1/models`.
-
-The general source hierarchy is: official documentation/standards/laws/original data/papers and systematic reviews; authoritative institutions and maintainers; fact-checked professional media; professional practice; then blogs, forums, and social-media leads. High-tier sources support key conclusions, repeated syndication is not independent evidence, and insufficient evidence is stated explicitly.
-
-Domain policies include:
-
-- Software and GitHub: prefer current default-branch docs, README, releases, changelog, migration guides, API references, commits, issues, pull requests, and maintainer statements; verify stable versions, dates, deprecations, and merged code.
-- Fitness, health, nutrition, and recovery: separate research support, expert practice, and athlete experience; account for training age, injury, baseline, recovery, equipment, and training phase; state the medical-assessment boundary for injury, disease, drugs, or extreme diets.
-- Vehicle and other high-risk safety: prefer official tests and real-world incident data, separate crash avoidance from occupant protection, avoid comparing incompatible rating protocols, and explain statistical limits and uncertainty.
-- Niche, ambiguous, or evidence-sparse questions: define concepts, use synonyms or other languages when useful, seek counterexamples, failures, and competing schools, and cross-check key claims with two independent source types where possible.
-
-Queries such as “latest,” “current,” “today,” “current version,” or “still supported” use the actual runtime date and timezone and verify versions, release dates, and update times. Complex answers explain evidence level, disputes, limits, scope, and uncertainty when useful; simple answers are not forced into a long template. The P4 `success`, `partial_success`, `error`, `error_detail`, and compatibility fields remain unchanged.
+Upstream protocol is selected by `GROK_API_PROTOCOL` (`chat` → `/chat/completions`, `response` → `/responses`). Matched domain addenda from `prompt_domains/*.md` are appended only when needed. Query and platform hints are short JSON data; retrieved content cannot override system rules.
 
 ## Timeout and concurrency governance
 
 Set Cherry Studio's outer MCP tool timeout to 300 seconds. This is a safety ceiling that prevents an early bare `-32001`, not a latency target. Each `web_search` uses `WEB_SEARCH_TOTAL_TIMEOUT=270` by default and actively returns success, partial success, or a structured error within that server-side wall-clock budget, leaving roughly 30 seconds for MCP serialization, scheduling, transport, and client-side variance.
 
-The per-attempt Grok read limit is controlled by `GROK_SINGLE_ATTEMPT_TIMEOUT`, defaulting to 120 seconds, and is clipped to the remaining total budget. `GROK_MODEL_MAX_ATTEMPTS=12` means at most twelve real HTTP requests, not twelve guaranteed requests. Grok-slot waits, Tavily-key waits, HTTP and stream time, exponential backoff, and `Retry-After` all consume the same total budget. A new retry is not started when the remaining budget is no longer reasonable for another attempt.
+The per-attempt Grok read limit is controlled by `GROK_SINGLE_ATTEMPT_TIMEOUT`, defaulting to 120 seconds, and is clipped to the remaining total budget. `GROK_MODEL_MAX_ATTEMPTS=5` means at most five real HTTP requests, not five guaranteed requests. Grok-slot waits, Tavily-key waits, HTTP and stream time, exponential backoff, and `Retry-After` all consume the same total budget. A new retry is not started when the remaining budget is no longer reasonable for another attempt.
 
 One MCP process runs at most two Grok HTTP requests by default. Tavily Search, Extract, and Map share key health and occupancy, with at most one real request on each key; distinct healthy keys can run concurrently. Success, failure, cancellation, timeout, and interrupted-stream paths release their slots, and every retry must queue again. Diagnostics distinguish `max_attempts_exhausted`, `non_retryable_error`, `total_budget_exhausted`, and `concurrency_queue_timeout`, with configured/actual attempts, elapsed time, budget, and queue wait.
 
@@ -266,7 +278,7 @@ Other tool examples:
 
 ## Grok protocol and one strong model with up to twelve real attempts
 
-The service uses streaming Chat Completions only. OpenRouter keeps the compatible `:online` model suffix, and every retry stays on the same `/v1/chat/completions` endpoint and current model.
+The service uses a single selected protocol (`chat` or `response`) without automatic cross-protocol failover. OpenRouter keeps the compatible `:online` model suffix, and every retry stays on the same endpoint and current model.
 
 Each call uses only the configured model. HTTP 408, 429, 5xx, connection failures, connect/read timeouts, interrupted streams, recognizable relay account-pool failures, and configured temporary codes inside HTTP 200 error bodies are retried with jittered exponential backoff, up to twelve real requests by default.
 
@@ -301,7 +313,7 @@ When every key is unavailable, `web_fetch` and `web_map` return `status="error"`
 
 ## Bounded runtime caches
 
-Source sessions live only in the current MCP process, with at most 256 entries and a one-hour TTL. `get_sources` returns `session_id_not_found_or_expired` for expired sessions. Successful model catalogs are cached for five minutes before `/models` is refreshed; failures are not cached as empty catalogs. Final answers are not cached long term, and full search bodies are not written to disk by default.
+Source sessions live only in the current MCP process, with at most 256 entries and a one-hour TTL. `get_sources` returns `session_id_not_found_or_expired` for expired sessions. Optional planning sessions also keep at most 256 entries and expire after one hour of inactivity. Successful model catalogs are cached for five minutes before `/models` is refreshed; failures are not cached as empty catalogs. Final answers are not cached long term, and full search bodies are not written to disk by default.
 
 ## Troubleshooting
 

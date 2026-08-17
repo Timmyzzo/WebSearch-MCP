@@ -1,4 +1,7 @@
+import time
 import uuid
+from collections import OrderedDict
+from collections.abc import Callable
 
 from pydantic import BaseModel
 
@@ -61,11 +64,42 @@ class PlanningSession:
 
 
 class PlanningEngine:
-    def __init__(self):
-        self._sessions: dict[str, PlanningSession] = {}
+    def __init__(
+        self,
+        max_size: int = 256,
+        ttl_seconds: float = 3600.0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._max_size = max(1, max_size)
+        self._ttl_seconds = max(0.0, ttl_seconds)
+        self._clock = clock
+        self._sessions: OrderedDict[str, tuple[float, PlanningSession]] = OrderedDict()
+
+    def _purge_expired(self, now: float) -> None:
+        expired = [
+            session_id
+            for session_id, (last_access, _) in self._sessions.items()
+            if now - last_access >= self._ttl_seconds
+        ]
+        for session_id in expired:
+            self._sessions.pop(session_id, None)
+
+    def _store_session(self, session: PlanningSession, now: float) -> None:
+        self._sessions[session.session_id] = (now, session)
+        self._sessions.move_to_end(session.session_id)
+        while len(self._sessions) > self._max_size:
+            self._sessions.popitem(last=False)
 
     def get_session(self, session_id: str) -> PlanningSession | None:
-        return self._sessions.get(session_id)
+        now = self._clock()
+        self._purge_expired(now)
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            return None
+        _, session = entry
+        self._store_session(session, now)
+        return session
 
     def process_phase(
         self,
@@ -77,12 +111,15 @@ class PlanningEngine:
         confidence: float = 1.0,
         phase_data: dict | list | None = None,
     ) -> dict:
-        if session_id and session_id in self._sessions:
-            session = self._sessions[session_id]
+        now = self._clock()
+        self._purge_expired(now)
+        entry = self._sessions.get(session_id) if session_id else None
+        if entry is not None:
+            _, session = entry
         else:
             sid = session_id if session_id else uuid.uuid4().hex[:12]
             session = PlanningSession(sid)
-            self._sessions[sid] = session
+        self._store_session(session, now)
 
         target = revises_phase if is_revision and revises_phase else phase
         if target not in PHASE_NAMES:
@@ -163,6 +200,7 @@ class PlanningEngine:
         if complete:
             result["executable_plan"] = session.build_executable_plan()
 
+        self._store_session(session, self._clock())
         return result
 
 

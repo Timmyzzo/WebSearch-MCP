@@ -9,6 +9,16 @@ class FakeGrokClient:
         return "Answer\n\nSources:\n- [Official](https://example.com/official)"
 
 
+class LabeledBareUrlGrokClient:
+    async def search(self, query, platform="", **kwargs):
+        return (
+            "Verified answer with note https://example.com/inline\n\n"
+            "**可核查来源链接：**\n"
+            "- 提交详情：https://github.com/GuDaStudio/GrokSearch/commit/afcdbcc\n"
+            "- 提交历史：https://github.com/GuDaStudio/GrokSearch/commits/main"
+        )
+
+
 class FailingGrokClient:
     async def search(self, query, platform="", **kwargs):
         from grok_search.clients.grok import GrokClientError, _AttemptFailure
@@ -85,6 +95,25 @@ async def test_web_search_merges_grok_and_tavily_sources(monkeypatch):
     assert result.content == "Answer"
     assert result.sources_count == 2
     assert [source.provider for source in sources.sources] == [None, "tavily"]
+
+
+async def test_web_search_caches_labeled_bare_urls(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://grok.example/v1")
+    monkeypatch.setenv("GROK_API_KEY", "secret")
+    monkeypatch.setenv("TAVILY_ENABLED", "false")
+    monkeypatch.setattr(web_tools, "_new_grok_client", lambda *args: LabeledBareUrlGrokClient())
+
+    result = await web_tools.web_search("question")
+    sources = await web_tools.get_sources(result.session_id)
+
+    assert result.status == "success"
+    assert "Verified answer" in result.content
+    assert "https://example.com/inline" in result.content
+    assert result.sources_count == 2
+    assert [source.url for source in sources.sources] == [
+        "https://github.com/GuDaStudio/GrokSearch/commit/afcdbcc",
+        "https://github.com/GuDaStudio/GrokSearch/commits/main",
+    ]
 
 
 async def test_web_search_feeds_tavily_candidates_into_grok_synthesis(monkeypatch):

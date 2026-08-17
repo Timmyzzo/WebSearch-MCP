@@ -66,6 +66,52 @@ _AUTH_PATTERNS = (
 )
 
 _MIN_NEW_ATTEMPT_BUDGET = 1.0
+_THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>\s*", re.IGNORECASE | re.DOTALL)
+_MULTI_AGENT_MODEL_RE = re.compile(r"multi[-_]?agent", re.IGNORECASE)
+_REASONING_EFFORT_SUFFIX_RE = re.compile(
+    r"[-_](low|medium|high|xhigh)$",
+    re.IGNORECASE,
+)
+# Multi-agent / deep research often exceeds the default 120s chat read timeout.
+_MULTI_AGENT_MIN_ATTEMPT_TIMEOUT = 600.0
+_VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def _sanitize_model_content(value: str) -> str:
+    return _THINK_BLOCK_PATTERN.sub("", value).strip()
+
+
+def is_multi_agent_model(model: str) -> bool:
+    """True for xAI multi-agent research models (e.g. grok-4.20-multi-agent-xhigh)."""
+    return bool(_MULTI_AGENT_MODEL_RE.search(model or ""))
+
+
+def resolve_reasoning_effort(model: str) -> str | None:
+    """Resolve Responses API ``reasoning.effort`` for multi-agent / reasoning models.
+
+    Priority: ``GROK_REASONING_EFFORT`` → model-name suffix (-xhigh/-high/…) →
+    multi-agent default ``high`` (16-agent tier per xAI docs).
+    """
+    explicit = config.grok_reasoning_effort
+    if explicit:
+        return explicit
+    match = _REASONING_EFFORT_SUFFIX_RE.search((model or "").strip())
+    if match:
+        return match.group(1).casefold()
+    if is_multi_agent_model(model):
+        return "high"
+    return None
+
+
+def resolve_api_protocol(model: str, configured: str | None = None) -> str:
+    """Pick chat vs response protocol.
+
+    xAI multi-agent models require the Responses API; Chat Completions is unsupported.
+    """
+    protocol = configured or config.grok_api_protocol
+    if is_multi_agent_model(model):
+        return "response"
+    return protocol
 
 
 def get_local_time_info() -> str:
@@ -284,7 +330,26 @@ class GrokClient:
             platform,
             supplemental_sources=supplemental_sources,
         )
-        await log_info(ctx, "Prepared bounded search request", config.debug_enabled)
+        configured_protocol = config.grok_api_protocol
+        protocol = resolve_api_protocol(primary, configured_protocol)
+        if protocol != configured_protocol and is_multi_agent_model(primary):
+            await log_info(
+                ctx,
+                (
+                    f"Model {primary} requires Responses API; "
+                    f"overriding GROK_API_PROTOCOL={configured_protocol} → response"
+                ),
+                config.debug_enabled,
+            )
+        path, payload = self._build_search_request(primary, messages, protocol)
+        await log_info(
+            ctx,
+            (
+                f"Prepared search via {path} protocol={protocol} "
+                f"tools={payload.get('tools')} reasoning={payload.get('reasoning')}"
+            ),
+            config.debug_enabled,
+        )
 
         counts = {primary: 0}
         last_failure = _AttemptFailure("upstream_unavailable", action="retry")
@@ -312,7 +377,6 @@ class GrokClient:
                     configured_max_attempts=attempts_limit,
                     budget=request_budget,
                 )
-            payload = {"model": primary, "messages": messages, "stream": True}
             try:
                 async with self._concurrency_limiter.slot(
                     request_budget,
@@ -327,7 +391,13 @@ class GrokClient:
                     counts[primary] += 1
                     try:
                         async with asyncio.timeout(remaining):
-                            result = await self._execute_stream(payload, timeout=remaining)
+                            result = await self._execute_stream(
+                                path,
+                                payload,
+                                timeout=remaining,
+                                protocol=protocol,
+                                model=primary,
+                            )
                     except TimeoutError as exc:
                         raise _AttemptFailure(
                             "total_budget_exhausted",
@@ -335,7 +405,7 @@ class GrokClient:
                         ) from exc
                 await log_info(
                     ctx,
-                    f"Grok model {primary} completed via chat/completions",
+                    f"Grok model {primary} completed via {path}",
                     config.debug_enabled,
                 )
                 return result
@@ -464,17 +534,79 @@ class GrokClient:
         delay = base * (0.5 + 0.5 * min(1.0, max(0.0, self._random())))
         return max(delay, retry_after or 0.0)
 
-    async def _execute_stream(self, payload: dict[str, Any], *, timeout: float) -> str:
+    @staticmethod
+    def _build_search_request(
+        model: str,
+        messages: list[dict[str, str]],
+        protocol: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Map protocol to endpoint path + JSON body (aligned with xAI docs).
+
+        ``chat`` → ``POST /chat/completions`` with ``messages`` + ``stream``.
+
+        ``response`` → ``POST /responses`` with:
+        - ``input``: role/content message array (official Responses shape)
+        - ``tools``: built-in server tools such as ``web_search`` / ``x_search``
+        - ``reasoning.effort``: multi-agent agent count (low/medium=4, high/xhigh=16)
+        - ``store``: default false for stateless MCP calls
+        """
+        if protocol == "response":
+            input_items: list[dict[str, str]] = []
+            for item in messages:
+                role = item.get("role")
+                content = item.get("content")
+                if not isinstance(role, str) or not isinstance(content, str):
+                    continue
+                if not content:
+                    continue
+                input_items.append({"role": role, "content": content})
+            payload: dict[str, Any] = {
+                "model": model,
+                "input": input_items,
+                "stream": True,
+                "store": config.grok_responses_store,
+            }
+            tools = config.grok_server_tools
+            if tools:
+                payload["tools"] = tools
+            effort = resolve_reasoning_effort(model)
+            if effort and effort in _VALID_REASONING_EFFORTS:
+                payload["reasoning"] = {"effort": effort}
+            return "/responses", payload
+
+        # Chat Completions: standard OpenAI-compatible shape.
+        # Multi-agent models never reach here (forced to response).
+        return (
+            "/chat/completions",
+            {"model": model, "messages": messages, "stream": True},
+        )
+
+    def _stream_read_timeout(self, *, model: str, timeout: float) -> float:
+        configured = float(config.grok_single_attempt_timeout)
+        if is_multi_agent_model(model):
+            configured = max(configured, _MULTI_AGENT_MIN_ATTEMPT_TIMEOUT)
+        return min(configured, timeout)
+
+    async def _execute_stream(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        protocol: str,
+        model: str,
+    ) -> str:
         try:
             client = await self._get_client()
+            read_timeout = self._stream_read_timeout(model=model, timeout=timeout)
             async with client.stream(
                 "POST",
-                "/chat/completions",
+                path,
                 headers=self.headers,
                 json=payload,
                 timeout=httpx.Timeout(
                     connect=min(6.0, timeout),
-                    read=min(config.grok_single_attempt_timeout, timeout),
+                    read=read_timeout,
                     write=min(10.0, timeout),
                     pool=timeout,
                 ),
@@ -482,7 +614,7 @@ class GrokClient:
                 if not response.is_success:
                     await response.aread()
                     raise self._classify_response(response)
-                return await self._parse_streaming_response(response)
+                return await self._parse_streaming_response(response, protocol=protocol)
         except _AttemptFailure:
             raise
         except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
@@ -494,7 +626,12 @@ class GrokClient:
         except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.RequestError) as exc:
             raise _AttemptFailure("network_failure", action="retry") from exc
 
-    async def _parse_streaming_response(self, response: httpx.Response) -> str:
+    async def _parse_streaming_response(
+        self,
+        response: httpx.Response,
+        *,
+        protocol: str,
+    ) -> str:
         content: list[str] = []
         body_lines: list[str] = []
         saw_sse = False
@@ -518,20 +655,23 @@ class GrokClient:
                     continue
                 if isinstance(data, dict) and isinstance(data.get("error"), dict):
                     raise self._classify_error_data(data, response.status_code)
-                choices = data.get("choices", []) if isinstance(data, dict) else []
-                if not choices or not isinstance(choices[0], dict):
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                    content.append(delta["content"])
-                if choice.get("finish_reason") is not None:
+                chunk_text, chunk_done = self._extract_stream_chunk(data, protocol=protocol)
+                if chunk_text:
+                    # response.completed may include the full output; if deltas already
+                    # accumulated text, do not append again.
+                    if chunk_done and content:
+                        completed = True
+                    else:
+                        content.append(chunk_text)
+                        if chunk_done:
+                            completed = True
+                elif chunk_done:
                     completed = True
         except _AttemptFailure:
             raise
         except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.NetworkError) as exc:
-            result = "".join(content)
-            if completed and result.strip():
+            result = _sanitize_model_content("".join(content))
+            if completed and result:
                 return result
             error_type = "stream_interrupted_after_content" if content else "stream_interrupted"
             raise _AttemptFailure(error_type, action="retry") from exc
@@ -540,8 +680,8 @@ class GrokClient:
             if not completed:
                 error_type = "stream_interrupted_after_content" if content else "stream_interrupted"
                 raise _AttemptFailure(error_type, action="retry")
-            result = "".join(content)
-            if result.strip():
+            result = _sanitize_model_content("".join(content))
+            if result:
                 return result
             raise _AttemptFailure("empty_response", action="retry")
 
@@ -552,13 +692,129 @@ class GrokClient:
             raise _AttemptFailure("invalid_response", action="retry") from exc
         if isinstance(data, dict) and isinstance(data.get("error"), dict):
             raise self._classify_error_data(data, response.status_code)
-        choices = data.get("choices", []) if isinstance(data, dict) else []
-        if choices and isinstance(choices[0], dict):
+        result = self._extract_non_stream_text(data, protocol=protocol)
+        if result:
+            return result
+        raise _AttemptFailure("empty_response", action="retry")
+
+    @classmethod
+    def _extract_stream_chunk(
+        cls,
+        data: object,
+        *,
+        protocol: str,
+    ) -> tuple[str, bool]:
+        """Return (text_delta, completed) for one SSE JSON object."""
+        if not isinstance(data, dict):
+            return "", False
+
+        if protocol == "response":
+            event_type = data.get("type")
+            if isinstance(event_type, str):
+                if event_type in {
+                    "response.output_text.delta",
+                    "response.text.delta",
+                    "content.delta",
+                }:
+                    delta = data.get("delta")
+                    if isinstance(delta, str):
+                        return delta, False
+                    if isinstance(delta, dict) and isinstance(delta.get("text"), str):
+                        return delta["text"], False
+                if event_type in {
+                    "response.completed",
+                    "response.done",
+                }:
+                    # Final event: pull any nested output_text if deltas were empty.
+                    nested = data.get("response")
+                    if isinstance(nested, dict):
+                        final_text = cls._extract_non_stream_text(nested, protocol="response")
+                        if final_text:
+                            return final_text, True
+                    text = data.get("text") or data.get("output_text")
+                    if isinstance(text, str) and text:
+                        return text, True
+                    return "", True
+                if event_type in {
+                    "response.output_text.done",
+                    "response.text.done",
+                }:
+                    text = data.get("text") or data.get("output_text")
+                    if isinstance(text, str) and text:
+                        return text, False
+                    return "", False
+                if event_type == "response.output_item.done":
+                    item = data.get("item")
+                    if isinstance(item, dict):
+                        # Prefer assistant message text; skip pure reasoning items.
+                        item_type = item.get("type")
+                        if item_type in {None, "message"}:
+                            content = item.get("content")
+                            if isinstance(content, list):
+                                parts: list[str] = []
+                                for part in content:
+                                    if not isinstance(part, dict):
+                                        continue
+                                    if part.get("type") in {
+                                        None,
+                                        "output_text",
+                                        "text",
+                                    } and isinstance(part.get("text"), str):
+                                        parts.append(part["text"])
+                                if parts:
+                                    return "".join(parts), False
+            # Fallback: chat-like shapes on a /responses stream
+            if isinstance(data.get("delta"), str):
+                return data["delta"], False
+
+        choices = data.get("choices", [])
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+            delta = choice.get("delta", {})
+            text = ""
+            if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                text = delta["content"]
+            done = choice.get("finish_reason") is not None
+            return text, done
+        return "", False
+
+    @staticmethod
+    def _extract_non_stream_text(data: object, *, protocol: str) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if protocol == "response":
+            output_text = data.get("output_text")
+            if isinstance(output_text, str) and output_text.strip():
+                return _sanitize_model_content(output_text)
+            output = data.get("output")
+            if isinstance(output, list):
+                parts: list[str] = []
+                for item in output:
+                    if not isinstance(item, dict):
+                        continue
+                    # Leader-agent final message only (skip encrypted reasoning blobs).
+                    if item.get("type") not in {None, "message"}:
+                        continue
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for part in content:
+                            if not isinstance(part, dict):
+                                continue
+                            if part.get("type") in {None, "output_text", "text"} and isinstance(
+                                part.get("text"), str
+                            ):
+                                parts.append(part["text"])
+                    elif isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+                if parts:
+                    return _sanitize_model_content("".join(parts))
+        choices = data.get("choices", [])
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
             message = choices[0].get("message", {})
             result = message.get("content", "") if isinstance(message, dict) else ""
-            if isinstance(result, str) and result.strip():
-                return result
-        raise _AttemptFailure("empty_response", action="retry")
+            if isinstance(result, str):
+                return _sanitize_model_content(result)
+        return ""
 
     def _classify_response(self, response: httpx.Response) -> _AttemptFailure:
         try:

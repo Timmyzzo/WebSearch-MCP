@@ -74,7 +74,9 @@ class Config:
     def grok_model_max_attempts(self) -> int:
         raw = os.getenv("GROK_MODEL_MAX_ATTEMPTS", "").strip()
         if not raw:
-            return 12
+            # Original GuDaStudio defaulted to 3 retries; keep a modest default so
+            # temporary upstream errors recover without stacking long MCP waits.
+            return 5
         try:
             value = int(raw)
         except ValueError as exc:
@@ -156,6 +158,101 @@ class Config:
                 f"Grok API URL 未配置！\n请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
             )
         return url
+
+    @property
+    def grok_api_protocol(self) -> str:
+        """Upstream Grok request style: ``chat`` or ``response``.
+
+        - ``chat`` → ``POST /chat/completions`` (OpenAI Chat Completions)
+        - ``response`` → ``POST /responses`` (xAI preferred Responses API)
+
+        Env: ``GROK_API_PROTOCOL``. Accepts aliases ``responses``→``response`` and
+        ``chat_completions`` / ``completions``→``chat``. Default: ``chat``.
+
+        Multi-agent models always resolve to ``response`` at request time regardless
+        of this setting (xAI docs: Chat Completions is not supported for multi-agent).
+        """
+        raw = os.getenv("GROK_API_PROTOCOL", "chat").strip().casefold()
+        aliases = {
+            "chat": "chat",
+            "chat_completions": "chat",
+            "completions": "chat",
+            "response": "response",
+            "responses": "response",
+        }
+        value = aliases.get(raw)
+        if value is None:
+            raise ValueError(
+                "GROK_API_PROTOCOL 必须是 chat 或 response"
+                "（也接受 chat_completions / responses 别名）"
+            )
+        return value
+
+    @property
+    def grok_server_tools(self) -> list[dict[str, object]]:
+        """Built-in xAI server tools for the Responses API.
+
+        Env ``GROK_SERVER_TOOLS``: comma-separated tool types.
+        Default when unset: ``web_search,x_search`` (matches xAI web research docs).
+        Set to empty / ``none`` / ``off`` / ``false`` to disable server tools.
+
+        Supported types (xAI built-ins): web_search, x_search, code_interpreter,
+        code_execution (alias of code_interpreter), collections_search.
+        """
+        raw = os.getenv("GROK_SERVER_TOOLS", "web_search,x_search").strip()
+        if not raw or raw.casefold() in {"none", "off", "false", "0", "-"}:
+            return []
+        allowed = {
+            "web_search": "web_search",
+            "x_search": "x_search",
+            "code_interpreter": "code_interpreter",
+            "code_execution": "code_interpreter",
+            "collections_search": "collections_search",
+        }
+        tools: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for item in self._split_env_list(raw):
+            tool_type = allowed.get(item.casefold())
+            if tool_type is None:
+                raise ValueError(
+                    "GROK_SERVER_TOOLS 含未知工具类型: "
+                    f"{item}（支持 web_search,x_search,code_interpreter,"
+                    "code_execution,collections_search）"
+                )
+            if tool_type in seen:
+                continue
+            seen.add(tool_type)
+            tools.append({"type": tool_type})
+        return tools
+
+    @property
+    def grok_reasoning_effort(self) -> str | None:
+        """Optional Responses ``reasoning.effort``: low | medium | high | xhigh.
+
+        Env ``GROK_REASONING_EFFORT``. When unset, multi-agent model names that end
+        with ``-xhigh`` / ``-high`` / ``-medium`` / ``-low`` supply the effort;
+        multi-agent models without a suffix default to ``high`` (16-agent tier).
+        """
+        raw = os.getenv("GROK_REASONING_EFFORT", "").strip().casefold()
+        if not raw:
+            return None
+        if raw not in {"low", "medium", "high", "xhigh"}:
+            raise ValueError(
+                "GROK_REASONING_EFFORT 必须是 low、medium、high 或 xhigh"
+            )
+        return raw
+
+    @property
+    def grok_responses_store(self) -> bool:
+        """Whether Responses API may store conversation state on the provider.
+
+        Env ``GROK_RESPONSES_STORE``. Default ``false`` (stateless MCP calls).
+        """
+        return os.getenv("GROK_RESPONSES_STORE", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     @property
     def grok_api_key(self) -> str:
@@ -353,9 +450,33 @@ class Config:
             max_attempts = f"配置错误: {exc}"
             config_status = f"❌ 配置错误: {exc}"
 
+        try:
+            api_protocol: str = self.grok_api_protocol
+        except ValueError as exc:
+            api_protocol = f"配置错误: {exc}"
+            config_status = f"❌ 配置错误: {exc}"
+
+        try:
+            server_tools: list[str] | str = [
+                str(item.get("type", "")) for item in self.grok_server_tools
+            ]
+        except ValueError as exc:
+            server_tools = f"配置错误: {exc}"
+            config_status = f"❌ 配置错误: {exc}"
+
+        try:
+            reasoning_effort: str | None = self.grok_reasoning_effort
+        except ValueError as exc:
+            reasoning_effort = f"配置错误: {exc}"  # type: ignore[assignment]
+            config_status = f"❌ 配置错误: {exc}"
+
         return {
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
+            "GROK_API_PROTOCOL": api_protocol,
+            "GROK_SERVER_TOOLS": server_tools,
+            "GROK_REASONING_EFFORT": reasoning_effort,
+            "GROK_RESPONSES_STORE": self.grok_responses_store,
             "GROK_PRIMARY_MODEL": self.grok_primary_model,
             "GROK_FALLBACK_MODEL": "已弃用（单模型模式）",
             "GROK_MODEL_MAX_ATTEMPTS": max_attempts,

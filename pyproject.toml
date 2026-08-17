@@ -30,6 +30,9 @@ Issues = "https://github.com/Timmyzzo/WebSearch-MCP/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"grok_search.prompt_domains" = ["*.md"]
+
 [project.scripts]
 grok-search = "grok_search.server:main"
 

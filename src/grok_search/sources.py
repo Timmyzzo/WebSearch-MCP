@@ -15,10 +15,19 @@ _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
     r"(?:\*\*|__)?\s*"
-    r"(sources?|references?|citations?|信源|参考资料|参考|引用|来源列表|来源)"
+    r"(?:"
+    r"sources?|references?|citations?|"
+    r"信源|参考资料|参考链接|参考|引用|来源列表|"
+    r"可核查来源(?:链接)?|来源链接|相关链接|核对链接|来源"
+    r")"
     r"\s*(?:\*\*|__)?"
     r"(?:\s*[（(][^)\n]*[)）])?"
-    r"\s*[:：]?\s*$"
+    r"\s*[:：]?\s*"
+    r"(?:\*\*|__)?"
+    r"\s*$"
+)
+_LABELED_URL_LINE_PATTERN = re.compile(
+    r"^(?P<label>.{0,80}?)\s*[:：]\s*(?P<url>https?://\S+)\s*$"
 )
 _SOURCES_FUNCTION_PATTERN = re.compile(
     r"(?im)(^|\n)\s*(sources|source|citations|citation|references|reference|citation_card|source_cards|source_card)\s*\("
@@ -163,6 +172,8 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
     if split:
         return split
 
+    # Keep original GuDaStudio behavior for unstructured answers: do not harvest every
+    # inline URL from the body as a source list when no source section is present.
     return raw, []
 
 
@@ -307,7 +318,12 @@ def _is_link_only_line(line: str) -> bool:
         return False
     if stripped.startswith(("http://", "https://")):
         return True
-    if _MD_LINK_PATTERN.search(stripped):
+    if _MD_LINK_PATTERN.fullmatch(stripped) or _MD_LINK_PATTERN.search(stripped):
+        # Pure markdown link or short labeled markdown link line.
+        remainder = _MD_LINK_PATTERN.sub("", stripped).strip(" -–—:：")
+        if not remainder or len(remainder) <= 40:
+            return True
+    if _LABELED_URL_LINE_PATTERN.fullmatch(stripped):
         return True
     return False
 
